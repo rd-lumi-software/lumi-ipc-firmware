@@ -2,7 +2,7 @@ BR_VER = 2024.02.10
 # Lumi boards (lumi/configs) load a second external tree. Upstream defconfigs
 # use the single-tree form $(BR2_EXTERNAL)/..., so they keep GENERAL alone.
 BR_EXTERNALS = $(PWD)/general$(if $(filter lumi/%,$(CONFIG)),:$(PWD)/lumi)
-BR_MAKE = $(MAKE) -C $(TARGET)/buildroot-$(BR_VER) BR2_EXTERNAL=$(BR_EXTERNALS) O=$(TARGET)
+BR_MAKE = $(MAKE) -C $(or $(LUMI_BUILDROOT_SOURCE),$(TARGET)/buildroot-$(BR_VER)) BR2_EXTERNAL=$(BR_EXTERNALS) O=$(TARGET)
 BR_LINK = https://github.com/buildroot/buildroot/archive
 BR_FILE = /tmp/buildroot-$(BR_VER).tar.gz
 BR_CONF = $(TARGET)/openipc_defconfig
@@ -45,22 +45,51 @@ ifneq ($(filter repack,$(MAKECMDGOALS)),)
 -include $(BR_CONF)
 endif
 
+ifeq ($(BOARD),lumi_t33gs_prj008_sc4336)
+ifeq ($(LUMI_T33_IN_CONTAINER),1)
+all: build
+	@$(MAKE) --no-print-directory TIMER=$(TIMER) timer
+else
+all: lumi-board-full
+endif
+else
 all: repack-final timer
+endif
+
+include ci/t33gs/targets.mk
 
 build: defconfig
+ifeq ($(BOARD),lumi_t33gs_prj008_sc4336)
+	+@bash "$(PWD)/ci/t33gs/run-buildroot.sh" $(BR_MAKE) all BR2_JLEVEL=$(T33GS_JOBS)
+else
 	@$(BR_MAKE) all -j$(shell nproc)
+endif
 
+ifeq ($(BOARD):$(LUMI_T33_IN_CONTAINER),lumi_t33gs_prj008_sc4336:1)
+br-%: defconfig
+	+@bash "$(PWD)/ci/t33gs/run-buildroot.sh" $(BR_MAKE) $(subst br-,,$@) BR2_JLEVEL=$(T33GS_JOBS)
+else ifeq ($(BOARD),lumi_t33gs_prj008_sc4336)
+br-%:
+	@T33GS_JOBS="$(T33GS_EFFECTIVE_JOBS)" bash "$(PWD)/ci/t33gs/rebuild.sh" "$@"
+else
 br-%: defconfig
 	@$(BR_MAKE) $(subst br-,,$@) -j$(shell nproc)
+endif
 
 defconfig: prepare
 	@echo --- $(or $(CONFIG),$(error variable BOARD not found))
 	@cat $(CONFIG) $(PWD)/general/openipc.fragment $(if $(filter lumi/%,$(CONFIG)),$(PWD)/lumi/lumi.fragment) > $(BR_CONF)
 	@grep -sE '^(BR2_GLOBAL_PATCH_DIR|BR2_ROOTFS_OVERLAY|BR2_ROOTFS_POST_BUILD_SCRIPT)=' $(CONFIG) >> $(BR_CONF) || true
+ifeq ($(BOARD),lumi_t33gs_prj008_sc4336)
+	@if test "$(LUMI_BUILD_VOICE)" = 0; then sed -i 's/^BR2_PACKAGE_LUMI_T33_VOICE=y/# BR2_PACKAGE_LUMI_T33_VOICE is not set/' $(BR_CONF); fi
+	+@bash "$(PWD)/ci/t33gs/run-buildroot.sh" $(BR_MAKE) BR2_DEFCONFIG=$(BR_CONF) defconfig
+else
 	@$(BR_MAKE) BR2_DEFCONFIG=$(BR_CONF) defconfig
+endif
 
 prepare:
-	@if test ! -e $(TARGET)/buildroot-$(BR_VER); then \
+	@mkdir -p $(TARGET)
+	@if test -z "$(LUMI_BUILDROOT_SOURCE)" && test ! -e $(TARGET)/buildroot-$(BR_VER); then \
 		wget -c -q $(BR_LINK)/$(BR_VER).tar.gz -O $(BR_FILE); \
 		mkdir -p $(TARGET); tar -xf $(BR_FILE) -C $(TARGET); fi
 	@# The majestic and majestic-webui tarballs are rolling release assets:
@@ -108,6 +137,11 @@ help:
 	- make package - list available packages\n \
 	- make distclean - remove buildroot and output folder\n \
 	- make br-linux - build linux kernel only\n\n"
+	@printf '%s\n' 'Lumi T33gs local source build:' \
+	  '- make t33gs-plan - check local source configuration' \
+	  '- make t33gs-full - build full firmware and OTA from local source' \
+	  '- make t33gs-help - show local build options' \
+	  '- make t33gs-test - test source snapshots and firmware packaging'
 
 list:
 	@ls -1 lumi/configs br-ext-chip-*/configs
@@ -161,6 +195,15 @@ endif
 repack-final: build
 	@$(MAKE) --no-print-directory BOARD=$(BOARD) TARGET=$(TARGET) repack
 
+ifeq ($(BOARD),lumi_t33gs_prj008_sc4336)
+repack:
+ifeq ($(LUMI_T33_IN_CONTAINER),1)
+	+@bash "$(PWD)/ci/t33gs/run-buildroot.sh" $(BR_MAKE) target-post-image BR2_JLEVEL=$(T33GS_JOBS)
+else
+	@T33GS_JOBS="$(T33GS_EFFECTIVE_JOBS)" bash "$(PWD)/ci/t33gs/rebuild.sh" br-target-post-image
+endif
+else
+
 repack:
 ifeq ($(BR2_PACKAGE_OPENIPC_NFS_ROOT),y)
 ifeq ($(BR2_OPENIPC_SOC_VENDOR),"rockchip")
@@ -198,6 +241,8 @@ ifeq ($(BR2_TARGET_ROOTFS_INITRAMFS),y)
 	@$(call PREPARE_REPACK,uImage,16384,,,initramfs)
 endif
 endif
+endif
+
 endif
 
 size-report:

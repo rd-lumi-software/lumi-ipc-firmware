@@ -1,0 +1,23 @@
+{
+  "board": "t33gs-prj008",
+  "kernelrelease": "4.4.94-lumi-t33gs",
+  "flash_bytes": 16777216,
+  "erase_bytes": 32768,
+  "environment_data_bytes": 16384,
+  "partitions": [
+    {"name": "boot", "offset": 0, "bytes": 262144},
+    {"name": "kernel", "offset": 262144, "bytes": 2621440},
+    {"name": "root", "offset": 2883584, "bytes": 12582912},
+    {"name": "rootfs_data", "offset": 15466496, "bytes": 1277952},
+    {"name": "env", "offset": 16744448, "bytes": 32768}
+  ],
+  "memory": {"linux_bytes": 100663296, "reserved_bytes": 33554432, "cma_bytes": 16777216},
+  "kernel_load_address": "0x80600000",
+  "uboot_config": "PRJ008_n_sfcnor_config",
+  "wifi_device": "aic8800d80-t33",
+  "hardware": {
+    "SOC_FAMILY": "t33", "SOC_PROJECT": "PRJ008", "SENSOR_MODEL": "sc4336",
+    "SENSOR_MODULE": "sensor_sc4336_PRJ008.ko", "ISP_MODULE": "tx-isp-PRJ008.ko",
+    "WIFI_PWR_GPIO": "72", "IRCUT_PIN_A": "66", "IRCUT_PIN_B": "67"
+  }
+}

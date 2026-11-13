@@ -1,0 +1,26 @@
+config BR2_PACKAGE_LUMI_T33_PLATFORM
+	bool "Lumi T33 PRJ008 SDK platform (4.4.94)"
+	depends on BR2_mipsel
+	select BR2_PACKAGE_HOST_UBOOT_TOOLS
+	select BR2_PACKAGE_HOST_KMOD
+	select BR2_PACKAGE_LUMI_T33_UBOOT
+	help
+	  Build the PRJ008 kernel and SDK modules with the vendor GCC 5.4
+	  toolchain. Sources and toolchains are provided by the pinned workspace.
+	  Source revisions and SDK checksums are recorded in the build manifest.
+
+config BR2_PACKAGE_LUMI_T33_RUNTIME
+	bool "Lumi T33 compact camera runtime"
+	depends on BR2_PACKAGE_LUMI_T33_PLATFORM
+	help
+	  Build the compact runtime from the pinned lumi-ipc-streamer source,
+	  including relay, recorder and snapshot dependencies.
+	  https://github.com/rd-lumi-software/lumi-ipc-streamer
+
+config BR2_PACKAGE_LUMI_T33_VOICE
+	bool "Lumi T33 voice worker"
+	depends on BR2_PACKAGE_LUMI_T33_RUNTIME
+	default y
+
+config BR2_PACKAGE_LUMI_T33_UBOOT
+	bool

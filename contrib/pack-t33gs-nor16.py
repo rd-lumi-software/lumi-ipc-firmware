@@ -3,17 +3,54 @@
 
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import struct
 import zlib
 
-FLASH_SIZE = 16 * 1024 * 1024
-UBOOT = (0x000000, 256 * 1024)
-KERNEL = (0x040000, 2560 * 1024)
-ROOTFS = (0x2C0000, 12 * 1024 * 1024)
-ENV_OFFSET = 0xFF8000
-ENV_BLOCK_SIZE = 32 * 1024
-ENV_DATA_SIZE = 16 * 1024
+DEFAULT_LAYOUT = Path(__file__).resolve().parents[1] / 'lumi/board/t33gs-prj008/layout.json'
+
+
+def load_layout(path=DEFAULT_LAYOUT):
+    layout = json.loads(Path(path).read_text())
+    cursor = 0
+    names = []
+    for entry in layout['partitions']:
+        if (entry['offset'] != cursor or entry['bytes'] <= 0
+                or entry['bytes'] % layout['erase_bytes']):
+            raise ValueError('Non-contiguous or unaligned flash partition: ' + entry['name'])
+        cursor += entry['bytes']
+        names.append(entry['name'])
+    if names != ['boot', 'kernel', 'root', 'rootfs_data', 'env'] or cursor != layout['flash_bytes']:
+        raise ValueError('Invalid NOR layout or flash capacity')
+    memory = layout['memory']
+    mib = 1024 * 1024
+    if (any(type(v) is not int or v <= 0 or v % mib for v in memory.values())
+            or memory['cma_bytes'] > memory['linux_bytes']):
+        raise ValueError('Invalid RAM/CMA layout')
+    if not 4 < layout['environment_data_bytes'] <= layout['partitions'][-1]['bytes']:
+        raise ValueError('Environment does not fit its partition')
+    return layout
+
+
+def memory_args(layout):
+    m = layout['memory']
+    return (f"mem={m['linux_bytes'] // 1048576}M@0x0 "
+            f"rmem={m['reserved_bytes'] // 1048576}M@{hex(m['linux_bytes'])} "
+            f"cma={m['cma_bytes'] // 1048576}M")
+
+
+def mtdparts(layout):
+    return 'mtdparts=sfc0_nor:' + ','.join(
+        f"{p['bytes'] // 1024}k({p['name']})" for p in layout['partitions'])
+
+
+LAYOUT = load_layout()
+FLASH_SIZE = LAYOUT['flash_bytes']
+UBOOT, KERNEL, ROOTFS = [(p['offset'], p['bytes']) for p in LAYOUT['partitions'][:3]]
+ENV_OFFSET = LAYOUT['partitions'][-1]['offset']
+ENV_BLOCK_SIZE = LAYOUT['partitions'][-1]['bytes']
+ENV_DATA_SIZE = LAYOUT['environment_data_bytes']
 
 
 def check_uimage(data: bytes) -> None:
@@ -32,18 +69,18 @@ def check_uimage(data: bytes) -> None:
 def make_environment(memory_args: str) -> bytes:
 	variables = {
 		"baudrate": "115200",
-		"bootcmd": "sf0 probe;sf0 read 0x80600000 0x40000 0x280000;bootm 0x80600000",
+		"bootcmd": (f"sf0 probe;sf0 read {LAYOUT['kernel_load_address']} {hex(KERNEL[0])} "
+                        f"{hex(KERNEL[1])};bootm {LAYOUT['kernel_load_address']}"),
 		"bootdelay": "1",
 		"bootargs": (
 			f"console=ttyS1,115200n8 {memory_args} init=/init "
 			"rootfstype=squashfs root=/dev/mtdblock2 rw "
-			"mtdparts=sfc0_nor:256k(boot),2560k(kernel),12288k(root),"
-			"1248k(rootfs_data),32k(env)"
+			f"{mtdparts(LAYOUT)}"
 		),
 		"stdin": "serial",
 		"stdout": "serial",
 		"stderr": "serial",
-		"wlandev": "aic8800d80-t33",
+		"wlandev": LAYOUT["wifi_device"],
 	}
 	data = b"\0".join(f"{key}={value}".encode() for key, value in variables.items()) + b"\0\0"
 	payload = data.ljust(ENV_DATA_SIZE - 4, b"\0")
@@ -81,7 +118,7 @@ def main() -> None:
 	parser.add_argument("--uboot", type=Path, required=True)
 	parser.add_argument("--kernel", type=Path, required=True)
 	parser.add_argument("--rootfs", type=Path, required=True)
-	parser.add_argument("--memory-args", default="mem=96M@0x0 rmem=32M@0x6000000 cma=16M")
+	parser.add_argument("--memory-args", default=memory_args(LAYOUT))
 	parser.add_argument("--output", type=Path, required=True)
 	args = parser.parse_args()
 	try:

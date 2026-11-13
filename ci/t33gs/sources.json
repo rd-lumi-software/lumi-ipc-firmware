@@ -1,0 +1,9 @@
+{
+  "streamer": {"path": "lumi-ipc-streamer", "repository_env": "LUMI_STREAMER_REPOSITORY", "commit_env": "LUMI_STREAMER_COMMIT"},
+  "linux": {"path": "lumi-ipc-linux", "repository_env": "LUMI_LINUX_REPOSITORY", "commit_env": "LUMI_LINUX_COMMIT"},
+  "relay": {"path": "iot-relay-cloud", "repository": "rd-lumi/iot-relay-cloud", "commit_env": "LUMI_RELAY_COMMIT"},
+  "uboot": {"path": "lumi-u-boot-t33", "repository_env": "LUMI_UBOOT_REPOSITORY", "commit_env": "LUMI_UBOOT_COMMIT"},
+  "tflm": {"path": "tflm", "repository": "yinzara/ingenic-tflite-micro", "commit": "112d98469cc5a2a02b85e36b856e46d41b32c3b9"},
+  "opus": {"path": "opus", "repository": "xiph/opus", "commit": "ddbe48383984d56acd9e1ab6a090c54ca6b735a6"},
+  "buildroot": {"path": "buildroot", "repository": "buildroot/buildroot", "commit": "c9620ac37e658d177821be85b4c9484e71e19710"}
+}

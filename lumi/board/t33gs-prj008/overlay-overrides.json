@@ -1,0 +1,46 @@
+{
+  "etc/init.d/S02fakehwclock": [
+    "general/overlay",
+    "lumi/overlay"
+  ],
+  "etc/init.d/S31hostname": [
+    "general/overlay",
+    "lumi/overlay"
+  ],
+  "etc/ntp.conf": [
+    "general/overlay",
+    "lumi/overlay"
+  ],
+  "etc/passwd": [
+    "general/overlay",
+    "lumi/overlay"
+  ],
+  "etc/profile": [
+    "general/overlay",
+    "lumi/overlay"
+  ],
+  "etc/rc.local": [
+    "general/overlay",
+    "lumi/overlay"
+  ],
+  "etc/shadow": [
+    "general/overlay",
+    "lumi/overlay"
+  ],
+  "usr/sbin/fake-hwclock": [
+    "general/overlay",
+    "lumi/overlay"
+  ],
+  "usr/sbin/sysupgrade": [
+    "general/overlay",
+    "lumi/overlay"
+  ],
+  "etc/init.d/S40network": [
+    "general/overlay",
+    "lumi/board/t33gs-prj008/overlay"
+  ],
+  "etc/init.d/S50dropbear": [
+    "general/overlay",
+    "lumi/board/t33gs-prj008/overlay"
+  ]
+}

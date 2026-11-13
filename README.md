@@ -1,3 +1,6 @@
+Lumi T33gs: xem [hướng dẫn CI/CD build full firmware và OTA](ci/t33gs/README.md)
+để thiết lập GitHub Actions, runner và bộ SDK đầu vào.
+
 ![OpenIPC logo][logo]
 
 ## Alternative open firmware for your IP camera
