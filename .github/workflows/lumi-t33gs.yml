@@ -1,0 +1,118 @@
+name: Lumi T33gs firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      voice:
+        description: Build combined voice worker
+        type: boolean
+        default: true
+      draft_release:
+        description: Publish artifacts as a draft GitHub release
+        type: boolean
+        default: false
+  push:
+    tags: ['lumi-t33gs-v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lumi-t33gs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: vars.LUMI_FIRMWARE_CI == 'true'
+    runs-on: [self-hosted, linux, x64, lumi-firmware]
+    timeout-minutes: 240
+    env:
+      LUMI_STREAMER_REPOSITORY: ${{ vars.LUMI_STREAMER_REPOSITORY }}
+      LUMI_STREAMER_COMMIT: ${{ vars.LUMI_STREAMER_COMMIT }}
+      LUMI_LINUX_REPOSITORY: ${{ vars.LUMI_LINUX_REPOSITORY }}
+      LUMI_LINUX_COMMIT: ${{ vars.LUMI_LINUX_COMMIT }}
+      LUMI_UBOOT_REPOSITORY: ${{ vars.LUMI_UBOOT_REPOSITORY }}
+      LUMI_UBOOT_COMMIT: ${{ vars.LUMI_UBOOT_COMMIT }}
+      LUMI_RELAY_COMMIT: ${{ vars.LUMI_RELAY_COMMIT }}
+      LUMI_INPUTS: ${{ vars.LUMI_T33GS_INPUTS_DIR }}
+      LUMI_T33GS_INPUTS_SHA256: ${{ vars.LUMI_T33GS_INPUTS_SHA256 }}
+      LUMI_BUILD_VOICE: ${{ github.event_name == 'push' && '1' || (inputs.voice && '1' || '0') }}
+      LUMI_BUILD_JOBS: ${{ vars.LUMI_BUILD_JOBS || '4' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check source pins and SDK bundle
+        run: |
+          bash ci/t33gs/fetch-sources.sh --workspace unused --plan
+          python3 ci/t33gs/firmware.py check-inputs "$LUMI_INPUTS" --sha256 "$LUMI_T33GS_INPUTS_SHA256"
+      - name: Prepare isolated workspace
+        run: |
+          work=$(mktemp -d "$RUNNER_TEMP/lumi-t33gs.XXXXXXXX")
+          echo "LUMI_RUN_DIR=$work" >> "$GITHUB_ENV"
+      - name: Fetch pinned sources
+        env:
+          LUMI_SOURCE_READ_TOKEN: ${{ secrets.LUMI_SOURCE_READ_TOKEN }}
+        run: bash ci/t33gs/fetch-sources.sh --workspace "$LUMI_RUN_DIR/source"
+      - name: Build container
+        run: docker build -t "lumi-t33gs-builder:$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ci/t33gs
+      - name: Build firmware and OTA
+        shell: bash
+        run: |
+          set -o pipefail
+          docker image inspect "lumi-t33gs-builder:$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --format '{{.Id}}' > "$LUMI_RUN_DIR/builder-image.txt"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --env HOME=/work/build-home \
+            --env LUMI_INPUTS=/inputs --env LUMI_T33GS_INPUTS_SHA256 \
+            --env LUMI_BUILD_VOICE --env LUMI_BUILD_JOBS \
+            --mount "type=bind,src=$LUMI_RUN_DIR/source,dst=/work" \
+            --mount "type=bind,src=$LUMI_INPUTS,dst=/inputs,readonly" \
+            "lumi-t33gs-builder:$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            bash /work/lumi-ipc-firmware/ci/t33gs/build-board.sh 2>&1 | tee "$LUMI_RUN_DIR/build.log"
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumi-t33gs-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ env.LUMI_RUN_DIR }}/source/artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build evidence
+        if: always() && env.LUMI_RUN_DIR != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumi-t33gs-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.LUMI_RUN_DIR }}/build.log
+            ${{ env.LUMI_RUN_DIR }}/builder-image.txt
+            ${{ env.LUMI_RUN_DIR }}/source/sources.json
+          if-no-files-found: ignore
+      - name: Remove isolated workspace
+        if: always() && env.LUMI_RUN_DIR != ''
+        run: |
+          case "$LUMI_RUN_DIR" in "$RUNNER_TEMP"/lumi-t33gs.*) rm -rf -- "$LUMI_RUN_DIR" ;; *) exit 1 ;; esac
+          docker image rm "lumi-t33gs-builder:$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" || true
+
+  release:
+    needs: build
+    if: github.event_name == 'push' || inputs.draft_release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lumi-t33gs-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts
+      - name: Verify and create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          (cd artifacts && sha256sum -c SHA256SUMS)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="lumi-t33gs-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          fi
+          gh release create "$tag" artifacts/* --draft --target "$GITHUB_SHA" \
+            --title "$tag" --notes 'T33gs PRJ008 firmware candidate. Hardware qualification pending. OTA requires the existing 12 MiB rootfs layout; see ci/t33gs/README.md.'

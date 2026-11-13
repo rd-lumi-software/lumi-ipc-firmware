@@ -122,6 +122,8 @@ ALL_BOARDS = [
 # named in UNBUILT_FAMILIES, or named here with a reason. Silence is no longer
 # an option, which is the actual fix --- the list below is just today's answer.
 UNBUILT_BOARDS = {
+    # The upstream matrix does not provision this SDK/source workspace.
+    "lumi_t33gs_prj008_sc4336": "built by lumi-t33gs.yml on SDK-equipped self-hosted runner",
     # Firmware-identical to a board that IS built, and served from it via
     # BR2_OPENIPC_SOC_ALIASES (manifest @alias). Building them would ship two
     # bit-identical images under different names. These two were already
@@ -676,7 +678,8 @@ def self_test():
     # The reverse, so the list cannot rot into a set of names that explain
     # nothing: an entry that got deleted, renamed, or quietly promoted.
     for board, reason in sorted(UNBUILT_BOARDS.items()):
-        if board not in tree.boards:
+        if board not in tree.boards and not os.path.isfile(
+                f"{REPO_ROOT}/lumi/configs/{board}_defconfig"):
             problems.append(f"{board} is in UNBUILT_BOARDS but has no defconfig; drop it")
         elif board in tree.built:
             problems.append(

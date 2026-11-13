@@ -1,0 +1,29 @@
+name: Lumi CI checks
+on:
+  pull_request:
+    paths: ['Makefile', 'ci/t33gs/**', 'lumi/Config.in', 'lumi/configs/lumi_t33gs_prj008_sc4336_defconfig', 'lumi/package/lumi-t33-*/**', 'lumi/board/t33gs-prj008/**', 'lumi/scripts/*t33*', '.github/workflows/lumi-*.yml', 'contrib/pack-t33gs-nor16.py', 'contrib/strip-t33gs-pdr.py', 'contrib/verify-t33gs-k4494.py', 'contrib/build-t33gs-k4494.sh', 'general/overlay/usr/sbin/sysupgrade']
+  push:
+    paths: ['Makefile', 'ci/t33gs/**', 'lumi/Config.in', 'lumi/configs/lumi_t33gs_prj008_sc4336_defconfig', 'lumi/package/lumi-t33-*/**', 'lumi/board/t33gs-prj008/**', 'lumi/scripts/*t33*', '.github/workflows/lumi-*.yml', 'contrib/pack-t33gs-nor16.py', 'contrib/strip-t33gs-pdr.py', 'contrib/verify-t33gs-k4494.py', 'contrib/build-t33gs-k4494.sh', 'general/overlay/usr/sbin/sysupgrade']
+permissions:
+  contents: read
+jobs:
+  check:
+    if: vars.LUMI_FIRMWARE_CI == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host test dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq rsync
+      - name: Test snapshots, packaging and input validation
+        run: make t33gs-test
+      - name: Parse build scripts and workflow shell blocks
+        run: |
+          python3 -m pip install 'PyYAML==6.0.3'
+          bash -n ci/t33gs/local.sh ci/t33gs/fetch-sources.sh ci/t33gs/test-local.sh
+          bash -n ci/t33gs/build.sh ci/t33gs/build-board.sh ci/t33gs/rebuild.sh ci/t33gs/run-buildroot.sh
+          bash -n lumi/board/t33gs-prj008/post-build.sh lumi/board/t33gs-prj008/post-image.sh
+          bash -n lumi/scripts/build-t33-runtime.sh lumi/scripts/install-t33-runtime.sh
+          bash -n ci/t33gs/post-build.sh
+          bash -n contrib/build-t33gs-k4494.sh
+          python3 .github/scripts/lint-workflow-shell.py
+          python3 .github/scripts/ci-matrix.py --self-test
