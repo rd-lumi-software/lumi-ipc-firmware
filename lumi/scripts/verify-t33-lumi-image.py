@@ -23,7 +23,31 @@ REQUIRED = ('ipc-stream-core', 'ipc-stream-services',
             'lumi-t33gs-motor-gpio-init')
 
 def check(root, kernel_release='4.4.94-lumi-t33gs'):
+    # A mountable image can still be unbootable if the external toolchain's
+    # float mode selects a loader absent from its own sysroot.
+    loader = '/lib/ld-musl-mipsel.so.1'
+    if not (root / loader.lstrip('/')).is_file():
+        raise ValueError('missing system musl loader')
+    for name in ('bin/busybox', 'usr/sbin/dropbear', 'usr/sbin/wpa_supplicant'):
+        path = root / name
+        data = path.read_bytes()
+        interpreters = []
+        if data[:6] != b'\x7fELF\x01\x01' or struct.unpack_from('<H', data, 18)[0] != 8:
+            raise ValueError(f'wrong system executable ABI: {name}')
+        for i in range(struct.unpack_from('<H', data, 44)[0]):
+            offset = struct.unpack_from('<I', data, 28)[0] + i * struct.unpack_from('<H', data, 42)[0]
+            kind, start, _, _, size = struct.unpack_from('<IIIII', data, offset)
+            if kind == 3:
+                interpreters.append(data[start:start+size].rstrip(b'\0').decode())
+        if interpreters != [loader]:
+            raise ValueError(f'wrong system loader: {name}: {interpreters}')
+        attributes = subprocess.check_output(['readelf', '-A', str(path)], text=True)
+        if 'FP ABI: Hard float' not in attributes:
+            raise ValueError(f'wrong system floating-point ABI: {name}')
     lumi = root / 'lumi'
+    if (lumi / 'gateway-profile.json').exists():
+        subprocess.run([os.sys.executable, str(Path(__file__).with_name('t33-gateway-profile.py')),
+                        'verify', str(lumi)], check=True)
     for name in RETIRED:
         if os.path.lexists(lumi / 'bin' / name):
             raise ValueError(f'retired compact-runtime service retained: {name}')
@@ -59,7 +83,10 @@ def check(root, kernel_release='4.4.94-lumi-t33gs'):
         expected = 'Soft float' if name in ('lumi-snapshot-ffmpeg', 'ipc-stream-services', 'ipc-voice-worker') else 'Hard float'
         if 'FP ABI: ' + expected not in attributes:
             raise ValueError(f'wrong floating-point ABI: {name}')
-    relay = gzip.decompress((lumi / 'bin/relay-agent.t33gs.gz').read_bytes())
+    relay_raw, relay_gzip = (lumi / 'bin/relay-agent.t33gs', lumi / 'bin/relay-agent.t33gs.gz')
+    if relay_raw.exists() == relay_gzip.exists():
+        raise ValueError('exactly one raw/gzip relay executable required')
+    relay = relay_raw.read_bytes() if relay_raw.exists() else gzip.decompress(relay_gzip.read_bytes())
     if relay[:6] != b'\x7fELF\x01\x01' or struct.unpack_from('<H', relay, 18)[0] != 8:
         raise ValueError('wrong relay ABI')
     with tempfile.NamedTemporaryFile() as executable:

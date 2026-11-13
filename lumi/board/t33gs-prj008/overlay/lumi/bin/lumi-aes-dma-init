@@ -1,0 +1,21 @@
+#!/bin/sh
+# DMA faults retain resources until power recovery; never retry or unload here.
+set -eu
+umask 077
+[ "$(id -u)" = 0 ]
+ready=/tmp/lumi-aes-dma.ready
+[ ! -f "$ready" ] || exit 0
+[ ! -e /tmp/lumi-aes-dma.attempted ] || { echo 'AES DMA requires reboot/power recovery' >&2; exit 1; }
+cat /proc/sys/kernel/random/boot_id > /tmp/lumi-aes-dma.attempted
+[ ! -e /dev/lumi-aes-dma ] && [ ! -L /dev/lumi-aes-dma ]
+grep -q ' ingenic_aes_dma_get_report$' /proc/kallsyms
+insmod "/lib/modules/$(uname -r)/ingenic/lumi_aes_dma4494_service.ko" gateway_uid=200
+[ -c /dev/lumi-aes-dma ] && [ ! -L /dev/lumi-aes-dma ]
+chown 0:0 /dev/lumi-aes-dma
+chmod 600 /dev/lumi-aes-dma
+/lumi/bin/lumi-aes-dma-client --acquire > /tmp/lumi-aes-dma-kat.log 2>&1
+/lumi/bin/lumi-aes-dma-client --kat >> /tmp/lumi-aes-dma-kat.log 2>&1
+grep -q '^PASS_DMA_ECB_MATRIX_NO_FALLBACK_RETAIN_UNTIL_POWER$' /tmp/lumi-aes-dma-kat.log
+chown 200:200 /dev/lumi-aes-dma
+chmod 600 /dev/lumi-aes-dma
+cat /proc/sys/kernel/random/boot_id > "$ready"
