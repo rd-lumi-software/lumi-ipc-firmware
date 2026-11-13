@@ -8,7 +8,8 @@ HOST_TOOLS=${T33_HOST_TOOLS_DIR:-$FW_ROOT/output/lumi-t33gs/host}
 : "${T33_SDK_ROOT:?Set T33_SDK_ROOT to the extracted vendor SDK release}"
 : "${T33_TOOLCHAIN_ROOT:?Set T33_TOOLCHAIN_ROOT to the SDK GCC5.4/uClibc toolchain}"
 OUTPUT=${T33_4494_OUTPUT_DIR:-$FW_ROOT/output/t33gs-k4494}
-BOARD_DIR="$REPO_ROOT/lumi-ipc-linux/kernel/ingenic/t33gs-4.4.94"
+LINUX_SOURCE=${LUMI_LINUX_SOURCE:-$REPO_ROOT/lumi-ipc-linux}
+BOARD_DIR="$LINUX_SOURCE/kernel/ingenic/t33gs-4.4.94"
 SDK="$OUTPUT/sdk"
 KERNEL="$SDK/kernel-4.4.94"
 BUILD="$OUTPUT/linux-build"
@@ -29,18 +30,23 @@ mkdir -p "$SDK" "$BUILD" "$OUTPUT/artifacts"
 grep -Fxq 'mips-linux-uclibc-gcc (Ingenic r3.3.7.mxu2.cve2-gcc540 2025.07-17) 5.4.0' "$OUTPUT/artifacts/toolchain.version"
 sha256sum "${CROSS}gcc" > "$OUTPUT/artifacts/toolchain.sha256"
 
-# Pin archives on first use. Reusing an output with another SDK is forbidden.
+# Pin source directories or SDK archives. Reusing an output with other inputs is forbidden.
 python3 - "$T33_SDK_ROOT" "$OUTPUT" <<'PY'
 import hashlib,json,pathlib,sys
 root,out=map(pathlib.Path,sys.argv[1:])
 inputs={}
 for name in ('kernel-4.4.94.7z','drivers.7z'):
-    candidates=list(root.rglob(name))
+    source=root/name.removesuffix('.7z')
+    candidates=[source] if source.is_dir() else list(root.rglob(name))
     if len(candidates)!=1: raise SystemExit(f'Expected one {name}, found {len(candidates)}')
     p=candidates[0].resolve()
     digest=hashlib.sha256()
-    with p.open('rb') as f:
-        for block in iter(lambda:f.read(1024*1024),b''): digest.update(block)
+    paths=sorted(p.rglob('*')) if p.is_dir() else [p]
+    for path in paths:
+        if not path.is_file(): continue
+        if p.is_dir(): digest.update(str(path.relative_to(p)).encode()+b'\0')
+        with path.open('rb') as f:
+            for block in iter(lambda:f.read(1024*1024),b''): digest.update(block)
     inputs[name]={'path':str(p),'sha256':digest.hexdigest()}
 p=out/'sdk-inputs.json'
 if p.exists() and json.loads(p.read_text())!=inputs:
@@ -50,12 +56,21 @@ PY
 KERNEL_ARCHIVE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel-4.4.94.7z"]["path"])' "$OUTPUT/sdk-inputs.json")
 DRIVER_ARCHIVE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["drivers.7z"]["path"])' "$OUTPUT/sdk-inputs.json")
 if [[ ! -f "$SDK/.kernel-extracted" ]]; then
-  7z x -y "-o$SDK" "$KERNEL_ARCHIVE" > "$SDK/kernel-extract.log" 2>&1
+  if [[ -d "$KERNEL_ARCHIVE" ]]; then
+    cp -a "$KERNEL_ARCHIVE" "$KERNEL"
+    make -C "$KERNEL" ARCH=mips "CROSS_COMPILE=$CROSS" mrproper > "$SDK/kernel-clean.log" 2>&1
+  else
+    7z x -y "-o$SDK" "$KERNEL_ARCHIVE" > "$SDK/kernel-extract.log" 2>&1
+  fi
   test -f "$KERNEL/Makefile"
   touch "$SDK/.kernel-extracted"
 fi
 if [[ ! -f "$SDK/.drivers-extracted" ]]; then
-  7z x -y "-o$SDK" "$DRIVER_ARCHIVE" 'drivers/isp/tx-isp/*' 'drivers/sensors/sc4336/*' 'drivers/audio/oss3/*' > "$SDK/drivers-extract.log" 2>&1
+  if [[ -d "$DRIVER_ARCHIVE" ]]; then
+    cp -a "$DRIVER_ARCHIVE" "$SDK/drivers"
+  else
+    7z x -y "-o$SDK" "$DRIVER_ARCHIVE" 'drivers/isp/tx-isp/*' 'drivers/sensors/sc4336/*' 'drivers/audio/oss3/*' > "$SDK/drivers-extract.log" 2>&1
+  fi
   test -f "$SDK/drivers/isp/tx-isp/libPRJ008-firmware-4494-540.a"
   test -f "$SDK/drivers/sensors/sc4336/PRJ007/sc4336.c"
   touch "$SDK/.drivers-extracted"
@@ -94,6 +109,7 @@ if [[ "${T33_4494_HIGHATOMIC_DIAGNOSTICS:-0}" = 1 ]]; then
 fi
 printf 'diagnostics=%s\n' "${T33_4494_HIGHATOMIC_DIAGNOSTICS:-0}" > "$OUTPUT/artifacts/highatomic-mode.txt"
 dma_source="$KERNEL/drivers/dma/ingenic/ingenic_dma.c"
+if [[ ! -e "$KERNEL/include/linux/ingenic_aes_dma_report.h" ]]; then
 dma_hash=$(sha256sum "$dma_source" | cut -d' ' -f1)
 case "$dma_hash" in
   6ce8b0128734b83860be69c048c8ab96d0bb499f30aa2aa809217fcd235d9df0)
@@ -104,6 +120,9 @@ esac
 python3 "$FW_ROOT/contrib/test_t33gs_dma_pool.py" "$dma_source"
 sha256sum "$dma_source" "$BOARD_DIR/0005-preallocate-dma-descriptor-page.patch" \
   > "$OUTPUT/artifacts/dma-pool-source.sha256"
+fi
+python3 "$FW_ROOT/contrib/build-t33gs-aes-dma.py" prepare \
+  --linux-repo "$LINUX_SOURCE" --kernel "$KERNEL" --output "$OUTPUT/provider"
 [[ "$PHASE" != --prepare ]] || exit 0
 
 # Stable metadata; SDK objects and generated files stay outside source repos.
@@ -119,6 +138,8 @@ if [[ "$PHASE" != --modules ]]; then
   else
     "${KMAKE[@]}" PRJ008_goat_defconfig
     (cd "$BUILD" && "$KERNEL/scripts/kconfig/merge_config.sh" -m -O "$BUILD" "$BUILD/.config" "$BOARD_DIR/t33gs.fragment")
+    (cd "$BUILD" && "$KERNEL/scripts/kconfig/merge_config.sh" -m -O "$BUILD" "$BUILD/.config" "$FW_ROOT/lumi/board/t33gs-prj008/t33.fragment")
+    (cd "$BUILD" && "$KERNEL/scripts/kconfig/merge_config.sh" -m -O "$BUILD" "$BUILD/.config" "$FW_ROOT/lumi/board/t33gs-prj008/t33-aes-dma4494.fragment")
   fi
   "${KMAKE[@]}" olddefconfig
 fi
@@ -148,8 +169,8 @@ done
 for native in t33gs-motor t33gs-tnpu; do
   dest="$OUTPUT/$native"
   mkdir -p "$dest"
-  cp "$REPO_ROOT/lumi-ipc-linux/kernel/ingenic/$native/Makefile" "$dest/"
-  cp "$REPO_ROOT/lumi-ipc-linux/kernel/ingenic/$native/"*.{c,h} "$dest/"
+  cp "$LINUX_SOURCE/kernel/ingenic/$native/Makefile" "$dest/"
+  cp "$LINUX_SOURCE/kernel/ingenic/$native/"*.{c,h} "$dest/"
   "${KMAKE[@]}" -j"${T33_BUILD_JOBS:-8}" "M=$dest" modules
 done
 mkdir -p "$OUTPUT/artifacts/modules"
@@ -161,13 +182,20 @@ release=$(cat "$OUTPUT/artifacts/kernelrelease.txt")
 
 AIC_REV=0e218ed686ee04a3006bb142ca70450dfa72f4d2
 AIC_ARCHIVE=${T33_AIC_SOURCE_ARCHIVE:-$FW_ROOT/output/t23-nor8/dl/aic8800-openipc/aic8800-openipc-$AIC_REV.tar.gz}
-test -f "$AIC_ARCHIVE"
 AIC="$OUTPUT/aic8800-$AIC_REV"
-if [[ ! -f "$AIC/Makefile" ]]; then
+if [[ -n "${T33_AIC_SOURCE_DIR:-}" ]]; then
+  test -f "$T33_AIC_SOURCE_DIR/Makefile"
+  rm -rf "$AIC"
+  cp -a "$T33_AIC_SOURCE_DIR" "$AIC"
+  (cd "$T33_AIC_SOURCE_DIR"; find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$OUTPUT/artifacts/aic-source.sha256"
+else
+  test -f "$AIC_ARCHIVE"
+  if [[ ! -f "$AIC/Makefile" ]]; then
   mkdir -p "$AIC"
   tar -xzf "$AIC_ARCHIVE" --strip-components=1 -C "$AIC"
+  fi
+  sha256sum "$AIC_ARCHIVE" > "$OUTPUT/artifacts/aic-source.sha256"
 fi
-sha256sum "$AIC_ARCHIVE" > "$OUTPUT/artifacts/aic-source.sha256"
 aic_hash=$(sha256sum "$AIC/aic8800_fdrv/aic_priv_cmd.c" | cut -d' ' -f1)
 case "$aic_hash" in
   786b458bf8015854a26e638cac349303b00e363fac7ac3a21631a7f6f7174801)
@@ -184,6 +212,14 @@ case "$aic_rx_hash" in
 esac
 "${KMAKE[@]}" -j"${T33_BUILD_JOBS:-8}" "M=$AIC" "PWD=$AIC" CONFIG_USE_FW_REQUEST=n modules
 cp "$AIC/aic_load_fw/aic_load_fw.ko" "$AIC/aic8800_fdrv/aic8800.ko" "$OUTPUT/artifacts/modules/"
+python3 "$FW_ROOT/contrib/build-t33gs-aes-dma.py" module \
+  --linux-repo "$LINUX_SOURCE" --kernel "$KERNEL" --build "$BUILD" \
+  --output "$OUTPUT/aes-dma-module" --cross "$CROSS"
+dest="$OUTPUT/t33gs-riscv-memory"
+mkdir -p "$dest"
+cp "$LINUX_SOURCE/kernel/ingenic/t33gs-riscv-memory/"*.{c,h} "$dest/"
+cp "$LINUX_SOURCE/kernel/ingenic/t33gs-riscv-memory/Makefile" "$dest/"
+"${KMAKE[@]}" "M=$dest" modules
 
 # Install only this build's modules, with a matching dependency index.
 MODROOT="$OUTPUT/artifacts/modules-root"
@@ -192,8 +228,35 @@ mkdir -p "$MODROOT/lib/modules/$release/ingenic" "$MODROOT/lib/modules/$release/
 cp "$ISP/tx-isp-PRJ008.ko" "$SENSOR/sensor_sc4336_PRJ008.ko" "$AUDIO/audio.ko" \
   "$OUTPUT/t33gs-motor/lumi_motor.ko" "$OUTPUT/t33gs-tnpu/tnpu.ko" "$MODROOT/lib/modules/$release/ingenic/"
 cp "$AIC/aic_load_fw/aic_load_fw.ko" "$AIC/aic8800_fdrv/aic8800.ko" "$MODROOT/lib/modules/$release/kernel/drivers/net/wireless/aic8800/"
+cp "$OUTPUT/aes-dma-module/lumi_aes_dma4494_service.ko" "$OUTPUT/t33gs-riscv-memory/lumi_riscv_mem.ko" "$MODROOT/lib/modules/$release/ingenic/"
 find "$MODROOT/lib/modules/$release" -name '*.ko' -exec "${CROSS}strip" --strip-debug {} +
 rm -f "$MODROOT/lib/modules/$release/build" "$MODROOT/lib/modules/$release/source"
 depmod -b "$MODROOT" "$release"
 python3 "$FW_ROOT/contrib/verify-t33gs-k4494.py" "$OUTPUT/artifacts" --output "$OUTPUT/artifacts/verification.json"
+if [[ -n "${T33GS_MUSL_TOOLCHAIN:-}" ]]; then
+  [[ ! -e "$OUTPUT/aes-dma-client" || -L "$OUTPUT/aes-dma-client" ]] || {
+    echo 'Refusing to replace a non-generated AES DMA client directory' >&2; exit 1;
+  }
+  client_build=$(mktemp -d "$OUTPUT/client.XXXXXX")
+  python3 "$LINUX_SOURCE/kernel/ingenic/t33gs-aes-dma4494/service/build_client.py" \
+    --cross "$T33GS_MUSL_TOOLCHAIN/bin/mipsel-linux-muslsf-" \
+    --module-build "$OUTPUT/aes-dma-module" --output "$client_build/artifact"
+  # Boot KAT shares the already installed SDK loader/libc; standalone trial
+  # clients above are also built/ABI-checked statically for host evidence.
+  "${CROSS}gcc" -Os -s -std=c11 -Wall -Wextra -Werror \
+    -Wl,--dynamic-linker=/opt/ingenic-t33/lib/ld-uClibc-0.9.33.2.so \
+    -Wl,-rpath,/opt/ingenic-t33/lib -I"$client_build/artifact" \
+    "$client_build/artifact/kat_client.c" -o "$client_build/artifact/lumi_dma_client.sdk"
+  mv "$client_build/artifact/lumi_dma_client.sdk" "$client_build/artifact/lumi_dma_client"
+  python3 - "$client_build/artifact" <<'PYCLIENT'
+import hashlib,json,pathlib
+p=pathlib.Path(__import__('sys').argv[1]); r=json.loads((p/'receipt.json').read_text())
+r['standalone_static_client_sha256']=r['client_sha256']
+r['client_sha256']=hashlib.sha256((p/'lumi_dma_client').read_bytes()).hexdigest()
+r['client_bytes']=(p/'lumi_dma_client').stat().st_size
+r['client_linkage']='SDK uClibc dynamic; /opt/ingenic-t33/lib'
+(p/'receipt.json').write_text(json.dumps(r,indent=2)+'\n')
+PYCLIENT
+  ln -sfn "$client_build/artifact" "$OUTPUT/aes-dma-client"
+fi
 echo "Experimental kernel/modules built in $OUTPUT/artifacts; board qualification pending."

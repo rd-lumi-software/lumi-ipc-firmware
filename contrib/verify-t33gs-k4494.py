@@ -10,6 +10,15 @@ import struct
 import zlib
 
 
+def decode_payload(image):
+    # Linux 4.4's size_append recipe adds the uncompressed length after LZMA.
+    decoder = lzma.LZMADecompressor()
+    payload = decoder.decompress(image[64:])
+    if not decoder.eof or decoder.unused_data not in (b'', struct.pack('<I', len(payload))):
+        raise ValueError('Truncated kernel LZMA or invalid size trailer')
+    return payload
+
+
 def validate(root):
     release = (root / 'kernelrelease.txt').read_text().strip()
     if release != '4.4.94-lumi-t33gs':
@@ -25,6 +34,8 @@ def validate(root):
         raise ValueError('uImage header CRC mismatch')
     if len(image) != 64 + size or zlib.crc32(image[64:]) & 0xffffffff != dcrc:
         raise ValueError('uImage payload size/CRC mismatch')
+    if image[32:64].rstrip(b'\0') != ('Linux-' + release).encode():
+        raise ValueError('uImage name does not match the kernel release required by OTA')
     config = set((root / 'kernel.config').read_text().splitlines())
     required = ('CONFIG_SOC_PRJ008=y', 'CONFIG_KERNEL_4_4_94=y',
                 'CONFIG_CMA_SIZE_MBYTES=16', 'CONFIG_IPV6=y',
@@ -65,7 +76,7 @@ def validate(root):
         if source_hash != expected[mode]:
             raise ValueError('Highatomic source hash does not match build mode')
         diagnostics = mode == 'diagnostics=1'
-        if (b'lumi-highatomic: first reserve' in lzma.decompress(image[64:])) != diagnostics:
+        if (b'lumi-highatomic: first reserve' in decode_payload(image)) != diagnostics:
             raise ValueError('Kernel diagnostic code does not match declared build mode')
         highatomic = {'source_sha256': source_hash, 'diagnostics': diagnostics}
     files = [root / 'uImage', root / 'kernel.config', *modules]
@@ -75,7 +86,7 @@ def validate(root):
     if dma_source.exists():
         if dma_source.read_text().split()[0] != '4f04924af046fdb5ef5cd66ab2ecaea247524d940aa0e6524a8b22a48f890543':
             raise ValueError('DMA pool source hash must match the bounded preallocation patch')
-        if b'failed to preallocate DMA descriptor page' not in lzma.decompress(image[64:]):
+        if b'failed to preallocate DMA descriptor page' not in decode_payload(image):
             raise ValueError('Kernel lacks declared DMA pool preallocation; rebuild the exact candidate')
         files.append(dma_source)
     result = {
