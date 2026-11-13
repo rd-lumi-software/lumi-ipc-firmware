@@ -1,0 +1,117 @@
+#!/bin/sh
+# FAT repair must finish offline before the recording owner can admit writes.
+SYS_BLOCK=/sys/class/block
+DEV_ROOT=/dev
+MOUNTINFO=/proc/self/mountinfo
+RUN_DIR=/tmp/lumi-sd-check
+
+is_block() { [ -b "$1" ]; }
+card_id() { cat "$SYS_BLOCK/mmcblk0/device/cid" 2>/dev/null; }
+report() {
+ printf '%s\n' "$1" > "$RUN_DIR/status"
+ printf 'component=sd-check state=%s detail=%s\n' "$1" "$2" >> "$RUN_DIR/check.log"
+ echo "Lumi SD: $1 ($2)"
+}
+select_volume() {
+ [ -d "$SYS_BLOCK/mmcblk0" ] || return 1
+ if is_block "$DEV_ROOT/mmcblk0p1"; then
+  device=$DEV_ROOT/mmcblk0p1; target=/mnt/mmcblk0p1
+ elif is_block "$DEV_ROOT/mmcblk0"; then
+  for part in "$SYS_BLOCK"/mmcblk0p*/partition; do [ ! -f "$part" ] || return 1; done
+  device=$DEV_ROOT/mmcblk0; target=/mnt/mmcblk0
+ else return 1
+ fi
+}
+volume_mounts() {
+ # mountinfo identifies the underlying block device even when mounted by alias.
+ numbers=$(stat -Lc '%t %T' "$device") || return 1
+ set -- $numbers
+ [ "$#" = 2 ] || return 1
+ device_number=$((0x$1)):$((0x$2))
+ awk -v dev="$device_number" '$3 == dev { print $5 }' "$MOUNTINFO"
+}
+observe_mounts() {
+ mounted_points=$(volume_mounts) || { report fault mount-identity-unavailable; return 1; }
+ for mounted in $mounted_points; do
+  [ "$mounted" = "$target" ] || { report fault unexpected-mount; return 1; }
+ done
+}
+same_card() { [ "$(card_id)" = "$cid" ] && is_block "$device"; }
+release_lock() { rm -f "$RUN_DIR/lock/pid"; rmdir "$RUN_DIR/lock" 2>/dev/null || true; }
+check_start() {
+ # Manual reruns may not unmount the volume underneath an active runtime.
+ if pidof ipc-stream-core ipc-stream-recorder >/dev/null 2>&1; then
+  report busy runtime-active; return 1
+ fi
+ cid=$(card_id); [ -n "$cid" ] || { report fault identity-unavailable; return 1; }
+ observe_mounts || return 1
+ if [ -n "$mounted_points" ]; then
+  timeout 10 umount "$target" >> "$RUN_DIR/check.log" 2>&1 || { report fault unmount-failed; return 1; }
+ fi
+ observe_mounts || return 1
+ [ -z "$mounted_points" ] || { report fault still-mounted; return 1; }
+ same_card || { report fault identity-changed; return 1; }
+ mkdir -p "$target" || return 1
+ verified=no
+ if command -v fsck.fat >/dev/null 2>&1; then
+  # Retain a descriptor for the selected device over check and repair.
+  if exec 9<>"$device"; then
+   if same_card; then
+    timeout 30 fsck.fat -n /proc/self/fd/9 >> "$RUN_DIR/check.log" 2>&1
+    checked=$?
+    if [ "$checked" = 0 ]; then verified=yes
+    elif [ "$checked" = 1 ]; then
+     same_card || { report fault identity-changed; return 1; }
+     observe_mounts || return 1
+     [ -z "$mounted_points" ] || { report fault mounted-during-check; return 1; }
+     report repairing fat-inconsistent
+     timeout 30 fsck.fat -a /proc/self/fd/9 >> "$RUN_DIR/check.log" 2>&1
+     repaired=$?
+     # dosfstools exit1 is ambiguous. Only an independent no-write pass
+     # with exit0 permits RW; standard fsck bitmask assumptions do not apply.
+     if [ "$repaired" = 0 ] || [ "$repaired" = 1 ]; then
+      if same_card && timeout 30 fsck.fat -n /proc/self/fd/9 >> "$RUN_DIR/check.log" 2>&1; then verified=yes; fi
+     fi
+    fi
+   fi
+   exec 9>&-
+  fi
+ fi
+ same_card || { report fault identity-changed; return 1; }
+ mode=ro
+ [ "$verified" != yes ] || mode=rw
+ if ! mount -t vfat -o "$mode" "$device" "$target" >> "$RUN_DIR/check.log" 2>&1; then
+  report fault mount-failed; return 1
+ fi
+ if [ "$verified" = yes ]; then report ready checked-offline; return 0; fi
+ report read_only repair-not-verified; return 1
+}
+check_stop() {
+ # rcK stops S60 first. Wait for the bounded recorder finalizer to release SD.
+ tries=0
+ while pidof ipc-stream-recorder >/dev/null 2>&1; do
+  [ "$tries" -lt 12 ] || { report busy recorder-not-stopped; return 1; }
+  tries=$((tries + 1)); sleep 1
+ done
+ observe_mounts || return 1
+ if [ -n "$mounted_points" ]; then
+  timeout 10 umount "$target" >> "$RUN_DIR/check.log" 2>&1 || { report busy unmount-failed; return 1; }
+ fi
+ report unmounted orderly-shutdown
+}
+main() {
+ umask 077
+ mkdir -p "$RUN_DIR" || return 1
+ case "${1:-}" in start|stop) ;; *) echo 'usage: lumi-sd-check start|stop' >&2; return 2;; esac
+ if ! mkdir "$RUN_DIR/lock" 2>/dev/null; then
+  owner=$(cat "$RUN_DIR/lock/pid" 2>/dev/null || true)
+  if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then release_lock; mkdir "$RUN_DIR/lock" || return 1
+  else echo 'Lumi SD: check already active' >&2; return 1; fi
+ fi
+ echo "$$" > "$RUN_DIR/lock/pid"
+ trap release_lock EXIT
+ select_volume || { report missing no-sd-volume; return 0; }
+ if [ "$1" = start ]; then check_start; else check_stop; fi
+}
+# Sourcing exposes the same state machine to host tests without opening devices.
+if [ "${0##*/}" = lumi-sd-check ]; then main "$@"; fi

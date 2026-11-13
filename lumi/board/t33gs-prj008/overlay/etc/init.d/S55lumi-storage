@@ -1,0 +1,6 @@
+#!/bin/sh
+# SSH is available during bounded SD checks; capture starts afterwards.
+case "${1:-}" in
+ start|stop) /lumi/bin/lumi-sd-check "$1" ;;
+ *) echo 'usage: S55lumi-storage start|stop' >&2; exit 2 ;;
+esac
