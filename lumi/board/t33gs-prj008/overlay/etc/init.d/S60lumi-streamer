@@ -58,12 +58,22 @@ start() {
  export T33GS_ISP_TUNING=0 T33GS_ISP_MAX_EXPOSURE_LINES=909
  export T33GS_ISP_TRIAL_SHARPNESS=140 T33GS_ISP_NR_TRIAL=1
  export T33GS_ISP_SINTER_RATIO=112 T33GS_ISP_TEMPER_RATIO=128
- export LUMI_HTTP_ADDR=127.0.0.1:18080
+ # Shared runtime profile qualified on .171 and .241; keep it in the image.
+ export T33GS_H264_INTRA_BUDGET_PERCENT=50
+ export T33GS_SHARED_AI_ZERO_PIXFMT=1 T33GS_BITSTREAM_PROFILE=compact1
+ export T33GS_MAIN_CODEC=h264 T33GS_SECOND_CODEC=h264 T33GS_SECOND_STREAM=1
+ export LUMI_P2P_STREAM_ID=0 P2P_PROFILE_BITRATES_KBPS=4096,2000,1500,1000
+ export LUMI_WORK_PROFILE=0 LUMI_PERF_DIAGNOSTICS=0
+ export LUMI_HTTP_ADDR=0.0.0.0:18080
  # Keep listener valid through DHCP changes without reopening the camera owner.
  export LUMI_RTSP_ADDR=0.0.0.0:18554
+ if [ -f /lumi/aes-dma.required ]; then
+  "$BIN/lumi-aes-dma-init" || { echo 'AES DMA startup failed; no software fallback' >&2; return 1; }
+ fi
  # Preserve the separately provisioned voice pilot without embedding secrets.
  voice=/overlay/lumi-voice
- if [ -f "$voice/ENABLED" ] && [ -f "$voice/READY" ]; then
+ if [ ! -x "$BIN/ipc-voice-worker" ]; then export LUMI_MODULE_VOICE=0; fi
+ if [ -x "$BIN/ipc-voice-worker" ] && [ -f "$voice/ENABLED" ] && [ -f "$voice/READY" ]; then
   [ "$(stat -c '%u:%a' "$voice")" = 0:700 ] && [ ! -L "$voice" ]
   [ "$(cat "$voice/ENABLED")" = cpu16k-v1 ]
   if [ ! -f "$voice/voice.conf" ] || [ -L "$voice/voice.conf" ] ||

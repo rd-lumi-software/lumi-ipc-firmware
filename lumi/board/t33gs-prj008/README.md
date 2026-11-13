@@ -11,13 +11,17 @@ operation and alternate ISP features remain unverified.
 
 ## Build
 
-The current T33gs kernel release is `4.4.94-lumi-t33gs`. Build its kernel and
-matching modules with `contrib/build-t33gs-k4494.sh --all`, then assemble them
-with a checksum-verified 4.4.94 rootfs baseline using
-`contrib/assemble-t33gs-k4494.py`. The [4.4.94 runbook](https://github.com/rd-lumi-software/lumi-ipc-streamer/blob/main/harness-docs/runbooks/t33gs-kernel-4494.md)
-lists the SDK/toolchain inputs, verification and recovery boundary. A build is a
-candidate until board checks pass. The old Buildroot board configuration is
-retired from the current build path.
+The current T33gs kernel release is `4.4.94-lumi-t33gs`. Run
+`make BOARD=lumi_t33gs_prj008_sc4336 -j4` to build from local sources through
+Buildroot and produce full NOR firmware and an OTA archive. `make t33gs-full`
+is a compatibility alias. See the [CI/local build guide](../../../ci/t33gs/README.md) for
+source paths, SDK inputs and build options. To build only the kernel and matching
+modules, use `contrib/build-t33gs-k4494.sh --all`.
+
+The [4.4.94 runbook](https://github.com/rd-lumi-software/lumi-ipc-streamer/blob/main/harness-docs/runbooks/t33gs-kernel-4494.md)
+documents verification and the recovery boundary. A build is a candidate until
+board checks pass. The old Buildroot board configuration is retired from the
+current build path.
 
 Compact runtime builds after 2026-10-11 install core, integrated HTTP/RTSP/P2P
 gateway and a POSIX supervisor; recorder and combined voice worker are optional.
@@ -37,12 +41,26 @@ its own environment through clap; changes require a reboot on T33. Provision
 `tools/voice-runtime/config/voice.conf.example` from the streamer repository
 with this device's secret. An optional private `luvox-init.json` stays in overlay and
 is referenced by `LUVOX_INIT_FILE`; the main supervisor owns combined voice restart. None of those private
-files belongs in the firmware. Without a mounted card, recorder stays disabled.
+files belongs in the firmware. Without a mounted card, the recorder stays alive
+to manage hotplug/format; recording waits for usable storage.
 
-The 4.4.94 assembler takes a byte-verified 4.4.94 rootfs baseline; it does not
-compile userspace. A release with new userspace must first produce and verify a
-matching rootfs baseline. Image build is not flash authorization or board
-qualification.
+The image includes the shared runtime profile qualified on the .171 and .241
+cameras: H.264 main/secondary streams, primary P2P stream 0, intra budget 50%,
+`compact1`, shared AI zero-pixfmt mode, bitrate ladder 4096/2000/1500/1000 kbps,
+and work/performance profiling disabled. These settings live in
+`overlay/etc/init.d/S60lumi-streamer`; they no longer require a device-only
+startup override.
+
+For a newly initialized device, `overlay/lumi/camera-profile.json` enables the
+microphone and talkback and selects continuous main-stream recording with audio,
+300-second segments and a 2 GiB recording quota. These are initialization
+defaults: an OTA retaining overlay preserves the existing device configuration.
+Wi-Fi, device identity, voice credentials, flip and day/night choices remain
+device-specific and are not copied from either camera into the shared profile.
+The external Web Viewer and its receiver playout hints are separate from firmware.
+
+The full build compiles userspace and checks the resulting rootfs before image
+packaging. Image build is not flash authorization or board qualification.
 
 ## Historical board bring-up
 
@@ -245,3 +263,18 @@ features retain their existing unsupported responses.
 
 Build/packaging and simulated init checks do not establish board behavior.
 Record an actual boot, API snapshot, RTSP and PTZ qualification separately.
+
+### WebRTC transport profile
+
+The unified runtime recipe pins `T33GS_GATEWAY_DMA_AES=1`,
+`T33GS_GATEWAY_DMA_GCM_BATCH=1`, and `T33GS_GATEWAY_DMA_GCM_MXU2=1`.
+The preceding qualified runtime used this profile; selecting DMA AES alone
+leaves GHASH on the CPU and is not an equivalent build configuration.
+
+Packaging checks `ipc-stream-services.build-info` against the actual ELF and
+requires the DMA batch/direct MXU2 backend. The installed
+`/lumi/gateway-profile.json` records that backend, feature list and ELF SHA256;
+the assembled-rootfs verifier checks them again. `python3
+ci/t33gs/test_pipeline.py` covers the build environment, a downgraded profile,
+missing receipts and a receipt belonging to another ELF. Native FPS/CPU and
+simultaneous audio/video operation still require camera validation.

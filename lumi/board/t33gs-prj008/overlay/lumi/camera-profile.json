@@ -17,16 +17,18 @@
     "generation": 0,
     "camera_name": "lumi",
     "stream_enabled": true,
-    "audio_capture_enabled": false,
-    "talkback_enabled": false,
+    "audio_capture_enabled": true,
+    "talkback_enabled": true,
     "recording": {
-      "mode": "off",
-      "segment_seconds": 60,
+      "mode": "continuous",
+      "stream": "main",
+      "schedule": [],
+      "segment_seconds": 300,
       "pre_event_seconds": 10,
       "post_event_seconds": 20,
       "prebuffer_bytes": 4194304,
-      "quota_bytes": 1073741824,
-      "audio_enabled": false
+      "quota_bytes": 2147483648,
+      "audio_enabled": true
     },
     "modules": {
       "ptz": true,
