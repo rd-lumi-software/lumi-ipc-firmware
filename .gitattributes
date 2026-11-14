@@ -1,0 +1,2 @@
+# Unified patch context includes a space before source tabs and blank lines.
+/lumi/package/all-patches/**/*.patch whitespace=-blank-at-eol,-space-before-tab

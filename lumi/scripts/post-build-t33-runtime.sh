@@ -95,4 +95,8 @@ if p.exists():
 PYEXT
 python3 "$(dirname "$0")/../../contrib/strip-t33gs-pdr.py" "$destination" \
  --objcopy "${T33GS_UCLIBC_TOOLCHAIN:?}/bin/mips-linux-uclibc-objcopy"
+# The same debugger records also remain in system tools and vendor modules.
+# Verify their allocated sections too; the 12 MiB rootfs must retain all runtime code.
+python3 "$(dirname "$0")/../../contrib/strip-t33gs-pdr.py" "$target" \
+ --objcopy "${T33GS_UCLIBC_TOOLCHAIN:?}/bin/mips-linux-uclibc-objcopy"
 python3 "$(dirname "$0")/verify-t33-lumi-image.py" "$target" --write-manifest

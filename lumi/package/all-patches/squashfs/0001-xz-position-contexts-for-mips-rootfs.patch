@@ -1,0 +1,20 @@
+Tune LZMA literal contexts for the MIPS-heavy T33gs NOR rootfs.
+The lc=0/lp=2 properties are supported by the existing kernel XZ decoder;
+keep the encoder preset, dictionary size, block size and filters unchanged.
+Measured RISC-V voice rootfs fixture: 12,591,104 -> 12,394,496 bytes.
+
+Upstream-Status: Inappropriate [board flash capacity]
+
+--- a/squashfs-tools/xz_wrapper.c
++++ b/squashfs-tools/xz_wrapper.c
+@@ -450,6 +450,10 @@
+                 	goto failed;
+ 
+ 		stream->opt.dict_size = stream->dictionary_size;
++		/* MIPS instructions are four-byte aligned; retain the same
++		 * LZMA2 stream, decoder and dictionary with position contexts. */
++		stream->opt.lc = 0;
++		stream->opt.lp = 2;
+ 
+ 		filter->length = 0;
+ 		res = lzma_stream_buffer_encode(filter->filter,

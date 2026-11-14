@@ -29,7 +29,7 @@ def main():
     parser.add_argument('--objcopy', required=True)
     args = parser.parse_args()
     removed = 0
-    for area in ('bin', 'lib'):
+    for area in ('bin', 'lib', 'sbin', 'usr/bin', 'usr/lib', 'usr/sbin'):
         for path in (args.lumi / area).rglob('*'):
             if path.is_symlink() or not path.is_file():
                 continue
