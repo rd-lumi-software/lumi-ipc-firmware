@@ -78,6 +78,8 @@ runtime đã build, mật khẩu Wi-Fi, relay key hay voice credentials vào b�
   uclibc/...                       # toàn bộ GCC5.4/uClibc toolchain
   musl/bin/mipsel-linux-muslsf-gcc
   musl/...                         # toàn bộ static soft-float musl toolchain
+  riscv/bin/riscv-none-embed-gcc   # RV32IMC/ILP32 newlib toolchain (voice)
+  riscv/...
   imp/include/imp/imp_isp.h
   imp/include/...                  # IMP headers tương thích libimp
   board/opt/ingenic-t33/lib/...     # libimp, alog, sysutils, uClibc và loader
@@ -292,6 +294,14 @@ rootfs_data 1248 KiB, env 32 KiB. Full flashing khởi tạo lại cấu hình t
 OTA dành cho camera **đã dùng đúng layout này**; chuyển từ layout cũ cần quy trình
 migration/full flash riêng. OTA không ghi U-Boot, env hay xóa rootfs_data.
 
+Trước OTA, kiểm tra camera đã có cả `/overlay/lumi-security/firewall4.rules`
+và `/overlay/lumi-security/firewall6.rules`: file thường, không phải symlink,
+không rỗng, owner root và mode `0600`. Policy phải cho phép máy quản trị truy cập
+SSH và các cổng API/media cần dùng. Camera chạy bản cũ có thể chưa có các file này;
+phải provision policy phù hợp trước khi nâng cấp. Firmware mới mặc định chặn
+kết nối vào khi thiếu policy, kể cả SSH/API, dù camera vẫn ping được. Không OTA
+máy chưa provision rồi trông chờ SSH để sửa sau reboot; cần UART để khôi phục.
+
 Sau khi đã kiểm chứng bản build trên board và xác nhận `/proc/mtd` đúng layout,
 tải và kiểm tra `SHA256SUMS` trên máy triển khai, copy OTA cùng `lumi-sysupgrade`
 vào `/tmp` camera rồi dùng:
@@ -320,3 +330,23 @@ make t33gs-test
 bash -n ci/t33gs/build.sh ci/t33gs/post-build.sh
 python3 .github/scripts/lint-workflow-shell.py
 ```
+
+## Wake-word RISC-V mặc định trên T33gs
+
+Khi build voice (mặc định), firmware build worker Linux không kèm suy luận CPU,
+đóng gói `/lumi/firmware/wake.rvpack` từ cùng snapshot source và dùng launcher
+`/lumi/bin/lumi-voice-riscv`. Launcher nạp module `lumi_riscv_mem.ko` cùng kernel;
+worker sử dụng kernel lease, không truy cập MMIO trực tiếp. Không cần payload
+trên thẻ nhớ. Cloud, PCM/AEC và xử lý hội thoại vẫn nằm trong worker Linux.
+
+Build local cần `T33GS_RISCV_TOOLCHAIN` trong `ci/t33gs/local.mk`, trỏ tới bộ
+RV32IMC/ILP32 newlib có `bin/riscv-none-embed-gcc` và `g++`.
+`T33GS_VOICE=0` không yêu cầu toolchain này và không đóng gói worker/payload.
+Voice vẫn cần cấu hình cloud/model và marker đã provision trong overlay;
+firmware không nhúng credentials và không tự bật voice trên máy chưa provision.
+Mặc định RISC-V này chỉ áp dụng profile T33gs PRJ008 hiện tại, không suy rộng
+sang board/SoC chưa hỗ trợ. Lỗi MCU được báo ở voice, không chuyển ngầm về CPU.
+
+Profile này chọn ngữ cảnh literal XZ `lc=0/lp=2` cho rootfs chủ yếu là mã MIPS,
+giúp chứa payload trong phân vùng 12 MiB. Preset, kích thước khối/dictionary,
+filter và bộ giải nén kernel giữ nguyên; kernel hiện tại hỗ trợ các giá trị này.

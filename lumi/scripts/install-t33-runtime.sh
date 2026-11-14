@@ -21,9 +21,13 @@ for name in ipc-stream-worker ipc-stream-motor media-worker-p2p.t33 lumi-t33gs-p
  rm -f "$destination/bin/$name"
 done
 if [ -x "$runtime/voice/bin/ipc-voice-worker" ]; then
+ test -s "${T33_RISCV_IMAGE:?Build the RISC-V wake payload with the voice worker}"
  install -m 755 "$runtime/voice/bin/ipc-voice-worker" "$destination/bin/ipc-voice-worker"
+ mkdir -p "$destination/firmware"
+ install -m 644 "$T33_RISCV_IMAGE" "$destination/firmware/wake.rvpack"
 else
  rm -f "$destination/bin/ipc-voice-worker"
+ rm -f "$destination/firmware/wake.rvpack"
 fi
 # SquashFS compresses the ELF more efficiently than an already gzipped ELF.
 gzip -dc "$runtime/bin/relay-agent.t33gs.gz" > "$destination/bin/relay-agent.t33gs"

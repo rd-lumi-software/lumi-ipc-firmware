@@ -69,6 +69,19 @@ ROLES=(firmware streamer)
 T33GS_STREAMER_SRC=$root/drivers
 T33GS_WORKSPACE=$root/drivers/output/new-build
 if (new_workspace) > /dev/null 2>&1; then fail 'Accepted workspace inside non-firmware source'; fi
+mkdir -p "$TEST_ROOT/sdk-source/bin"
+printf '#!/bin/sh\nexit 0\n' > "$TEST_ROOT/sdk-source/bin/compiler"
+chmod 755 "$TEST_ROOT/sdk-source/bin/compiler"
+ln -s compiler "$TEST_ROOT/sdk-source/bin/compiler-alias"
+ln -s /outside/repo-metadata "$TEST_ROOT/sdk-source/.git"
+stage_sdk_input "$TEST_ROOT/sdk-source" "$TEST_ROOT/sdk-staged"
+[[ -x $TEST_ROOT/sdk-staged/bin/compiler ]]
+[[ $(readlink "$TEST_ROOT/sdk-staged/bin/compiler-alias") == compiler ]]
+[[ ! -e $TEST_ROOT/sdk-staged/.git && ! -L $TEST_ROOT/sdk-staged/.git ]]
+validate_links "$TEST_ROOT/sdk-staged"
+printf public-cert > "$TEST_ROOT/certificate"
+stage_sdk_input "$TEST_ROOT/certificate" "$TEST_ROOT/certificate-staged"
+cmp "$TEST_ROOT/certificate" "$TEST_ROOT/certificate-staged"
 mkdir -p "$TEST_ROOT/sdk/musl/mipsel-linux-muslsf/lib"
 lib=$TEST_ROOT/sdk/musl/mipsel-linux-muslsf/lib
 ln -s /lib/libc.so "$lib/ld-musl-mipsel-sf.so.1"

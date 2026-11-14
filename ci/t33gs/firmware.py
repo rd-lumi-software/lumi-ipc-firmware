@@ -77,6 +77,11 @@ def verify_inputs(root, expected):
     for compiler in ('uclibc/bin/mips-linux-uclibc-gcc', 'musl/bin/mipsel-linux-muslsf-gcc'):
         if not (root / compiler).stat().st_mode & 0o111:
             raise ValueError('Compiler is not executable: ' + compiler)
+    if (root / 'riscv').exists():
+        for compiler in ('riscv-none-embed-gcc', 'riscv-none-embed-g++'):
+            path = root / 'riscv/bin' / compiler
+            if not path.is_file() or not path.stat().st_mode & 0o111:
+                raise ValueError('Missing RISC-V compiler: ' + compiler)
     # Board assets cannot inject services, executables or device identities.
     for path in (root / 'board').rglob('*'):
         if path.is_file():

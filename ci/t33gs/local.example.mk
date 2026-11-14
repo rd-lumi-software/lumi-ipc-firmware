@@ -13,6 +13,7 @@ T33GS_AIC_SRC := /path/to/aic8800
 
 T33GS_UCLIBC_TOOLCHAIN := /path/to/mips-gcc540-uclibc
 T33GS_MUSL_TOOLCHAIN := /path/to/mipsel-linux-muslsf-cross
+T33GS_RISCV_TOOLCHAIN := /path/to/xpack-riscv-none-embed-gcc-10.2.0-1.2
 T33GS_IMP_HEADERS := /path/to/media/include
 T33GS_VENDOR_LIBRARIES := /path/to/vendor-uclibc-libraries
 T33GS_SENSOR_TUNING := /path/to/sc4336-prj008-tuning

@@ -7,6 +7,10 @@ ROLES=(firmware streamer linux uboot relay tflm opus buildroot kernel drivers ai
 DESTS=(lumi-ipc-firmware lumi-ipc-streamer lumi-ipc-linux lumi-u-boot-t33 iot-relay-cloud tflm opus buildroot local-inputs/sdk/kernel-4.4.94 local-inputs/sdk/drivers local-inputs/aic8800)
 INPUT_VARS=(T33GS_UCLIBC_TOOLCHAIN T33GS_MUSL_TOOLCHAIN T33GS_IMP_HEADERS T33GS_VENDOR_LIBRARIES T33GS_SENSOR_TUNING T33GS_WIFI_FIRMWARE T33GS_RELAY_CERTIFICATE)
 INPUT_DESTS=(uclibc musl imp/include board/opt/ingenic-t33/lib board/etc/sensor board/lib/firmware tunnel.cert)
+if [[ ${T33GS_VOICE:-1} == 1 ]]; then
+    INPUT_VARS+=(T33GS_RISCV_TOOLCHAIN)
+    INPUT_DESTS+=(riscv)
+fi
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
 GENERATED=('*.o' '*.ko' '*.a' '*.so' '*.so.*' '*.cmd' '*.mod.c' '*.pyc' '.config*'
@@ -121,6 +125,10 @@ validate_config() {
     [[ ${T33GS_VOICE:-1} =~ ^[01]$ ]] || fail 'T33GS_VOICE must be 0 or 1'
     [[ -x $T33GS_UCLIBC_TOOLCHAIN/bin/mips-linux-uclibc-gcc ]] || fail 'Missing uClibc compiler'
     [[ -x $T33GS_MUSL_TOOLCHAIN/bin/mipsel-linux-muslsf-gcc ]] || fail 'Missing musl compiler'
+    if [[ ${T33GS_VOICE:-1} == 1 ]]; then
+        [[ -x $T33GS_RISCV_TOOLCHAIN/bin/riscv-none-embed-gcc &&
+           -x $T33GS_RISCV_TOOLCHAIN/bin/riscv-none-embed-g++ ]] || fail 'Missing RV32IMC/newlib compiler'
+    fi
     for marker in "$T33GS_KERNEL_SRC/Makefile" "$T33GS_DRIVERS_SRC/isp/tx-isp" \
         "$T33GS_DRIVERS_SRC/sensors/sc4336" "$T33GS_DRIVERS_SRC/audio/oss3" \
         "$T33GS_AIC_SRC/Makefile" "$T33GS_AIC_SRC/aic8800_fdrv"; do
@@ -167,6 +175,18 @@ relocate_musl_loader() {
     fi
 }
 
+stage_sdk_input() {
+    local source=$1 destination=$2
+    if [[ -d $source ]]; then
+        mkdir -p -- "$destination"
+        # Toolchains may come from repo-managed SDKs. Git metadata is not an
+        # SDK input and can contain links outside the self-contained bundle.
+        rsync -a --exclude=.git -- "$source/" "$destination/"
+    else
+        cp -a -- "$source" "$destination"
+    fi
+}
+
 prepare_inputs() {
     local root=$WORKSPACE/local-inputs i var dest checksum
     for i in "${!INPUT_VARS[@]}"; do
@@ -174,7 +194,7 @@ prepare_inputs() {
         dest=$root/${INPUT_DESTS[$i]}
         echo "Staging SDK: ${!var}" >&2
         mkdir -p -- "$(dirname -- "$dest")"
-        cp -a -- "${!var}" "$dest"
+        stage_sdk_input "${!var}" "$dest"
     done
     python3 "$HERE/../../lumi/board/t33gs-prj008/fix-xsym-links.py" "$root/board/opt/ingenic-t33/lib" >&2
     relocate_musl_loader "$root"

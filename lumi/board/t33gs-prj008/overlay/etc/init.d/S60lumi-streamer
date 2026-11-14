@@ -94,7 +94,7 @@ start() {
    cp "$voice/$name" "/tmp/lumi-voice/$name"
    chmod 600 "/tmp/lumi-voice/$name"
   done
-  export LUMI_MODULE_VOICE=1 LUMI_VOICE_BIN=$BIN/ipc-voice-worker
+  export LUMI_MODULE_VOICE=1 LUMI_VOICE_BIN=$BIN/lumi-voice-riscv
   export LUMI_VOICE_DIR=/tmp/lumi-voice LUMI_VOICE_MODEL=/tmp/lumi-voice/model.tflite
  fi
  # Keep the lightweight recorder alive without a card: it owns hotplug/format.

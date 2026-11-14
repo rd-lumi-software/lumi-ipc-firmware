@@ -1,0 +1,11 @@
+#!/bin/sh
+# This board firmware defaults provisioned voice to its image-owned wake MCU.
+# Load failures degrade only voice under the existing supervisor.
+set -eu
+if [ ! -c /dev/lumi-riscv-mem ]; then
+ insmod "/lib/modules/$(uname -r)/ingenic/lumi_riscv_mem.ko"
+fi
+export LUMI_WAKE_BACKEND=riscv
+export LUMI_RISCV_IMAGE=/lumi/firmware/wake.rvpack
+unset LUMI_RISCV_MEM_FD LUMI_VOICE_PCM_TRIAL LUMI_VOICE_PCM_TIMING
+exec /lumi/bin/ipc-voice-worker "$@"

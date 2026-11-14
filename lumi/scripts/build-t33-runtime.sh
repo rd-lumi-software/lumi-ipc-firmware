@@ -37,8 +37,9 @@ streamer=$root/source/lumi-ipc-streamer
 if [[ ${LUMI_BUILD_VOICE:-1} == 1 ]]; then
   (cd "$streamer" && CARGO_PROFILE_RELEASE_OPT_LEVEL=s \
     CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-    bash scripts/build_voice_runtime.sh)
+    T33GS_VOICE_WAKE_BACKEND=riscv bash scripts/build_voice_runtime.sh)
   export T33GS_VOICE_ARTIFACT_DIR="$streamer/target/artifacts/voice-runtime-t33gs"
+  bash "$(dirname "$0")/build-t33-riscv-wake.sh" "$streamer" "$root/riscv-wakeword"
 else
   unset T33GS_VOICE_ARTIFACT_DIR
 fi

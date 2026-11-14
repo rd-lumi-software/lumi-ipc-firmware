@@ -20,6 +20,7 @@ export T33_SDK_ROOT="$LUMI_INPUTS/sdk"
 export T33_TOOLCHAIN_ROOT="$LUMI_INPUTS/uclibc"
 export T33GS_UCLIBC_TOOLCHAIN="$T33_TOOLCHAIN_ROOT"
 export T33GS_MUSL_TOOLCHAIN="$LUMI_INPUTS/musl"
+export RISCV_PREFIX="$LUMI_INPUTS/riscv/bin/riscv-none-embed-"
 export T33GS_IMP_SDK="$LUMI_INPUTS/imp"
 export T33GS_IMP_LIB_DIR="$LUMI_INPUTS/board/opt/ingenic-t33/lib"
 export T33GS_NATIVE_PREFIX="$out/native"
@@ -54,8 +55,10 @@ export OKLUMI_TFLM_SOURCE="$LUMI_WORKSPACE/tflm"
 if [[ "${LUMI_BUILD_VOICE:-1}" == 1 ]]; then
   (cd "$streamer" && CARGO_PROFILE_RELEASE_OPT_LEVEL=s \
     CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-    bash scripts/build_voice_runtime.sh)
+    T33GS_VOICE_WAKE_BACKEND=riscv bash scripts/build_voice_runtime.sh)
   export T33GS_VOICE_ARTIFACT_DIR="$streamer/target/artifacts/voice-runtime-t33gs"
+  bash "$fw/lumi/scripts/build-t33-riscv-wake.sh" "$streamer" "$out/riscv-wakeword"
+  export T33_RISCV_IMAGE="$out/riscv-wakeword/wake.rvpack"
 elif [[ "${LUMI_BUILD_VOICE:-1}" != 0 ]]; then
   echo 'LUMI_BUILD_VOICE must be 0 or 1' >&2; exit 1
 fi

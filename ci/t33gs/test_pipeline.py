@@ -50,6 +50,75 @@ def rootfs():
 
 
 class PipelineTests(unittest.TestCase):
+    def test_riscv_payload_rejects_corruption_and_layout_mismatch(self):
+        spec = importlib.util.spec_from_file_location(
+            'rootfs_verifier', HERE.parents[1] / 'lumi/scripts/verify-t33-lumi-image.py')
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
+        with tempfile.TemporaryDirectory() as tmp:
+            lumi = Path(tmp)
+            (lumi / 'bin').mkdir()
+            (lumi / 'firmware').mkdir()
+            worker = lumi / 'bin/ipc-voice-worker'
+            worker.write_bytes(b'/dev/lumi-riscv-mem')
+            wrapper = lumi / 'bin/lumi-voice-riscv'
+            wrapper.write_text('#!/bin/sh\nexit 0\n')
+            wrapper.chmod(0o755)
+            image = bytes(256)
+            reloc = struct.pack('<3I', 1, 128, 0)
+            valid = (struct.pack('<8I', 0x33565752, 1, 0x050d0000,
+                                 0x100000, len(image), 0x80, 0xff000, 1)
+                     + hashlib.sha256(image).digest() + hashlib.sha256(reloc).digest()
+                     + image + reloc)
+            payload = lumi / 'firmware/wake.rvpack'
+            payload.write_bytes(valid)
+            verifier.check_riscv_voice(lumi)
+            bad_reloc = struct.pack('<3I', 99, 128, 0)
+            bad_table = valid[:64] + hashlib.sha256(bad_reloc).digest() + image + bad_reloc
+            for bad in (valid[:95], valid[:-1], valid[:100] + b'x' + valid[101:],
+                        b'BAD!' + valid[4:], bad_table):
+                payload.write_bytes(bad)
+                with self.assertRaises(ValueError):
+                    verifier.check_riscv_voice(lumi)
+            payload.write_bytes(valid)
+            worker.write_bytes(b'CPU only')
+            with self.assertRaisesRegex(ValueError, 'lacks the RISC-V'):
+                verifier.check_riscv_voice(lumi)
+            worker.unlink()
+            with self.assertRaisesRegex(ValueError, 'orphan'):
+                verifier.check_riscv_voice(lumi)
+            payload.unlink()
+            verifier.check_riscv_voice(lumi)
+
+    def test_riscv_launcher_selects_image_and_stops_on_driver_failure(self):
+        import os
+        source = (HERE.parents[1] / 'lumi/board/t33gs-prj008/overlay/lumi/bin/lumi-voice-riscv').read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = root / 'worker'
+            worker.write_text('#!/usr/bin/env python3\nimport os,json,sys\n'
+                              'json.dump({"backend":os.environ["LUMI_WAKE_BACKEND"],'
+                              '"image":os.environ["LUMI_RISCV_IMAGE"],"args":sys.argv[1:],'
+                              '"trial":os.environ.get("LUMI_VOICE_PCM_TRIAL")},'
+                              'open(os.environ["RECEIPT"],"w"))\n')
+            worker.chmod(0o755)
+            insmod = root / 'insmod'
+            insmod.write_text('#!/bin/sh\nexit "$DRIVER_STATUS"\n')
+            insmod.chmod(0o755)
+            launcher = root / 'launcher'
+            launcher.write_text(source.replace('/lumi/bin/ipc-voice-worker', str(worker)))
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
+                       RECEIPT=str(root / 'receipt'), LUMI_WAKE_BACKEND='cpu',
+                       LUMI_VOICE_PCM_TRIAL='1', DRIVER_STATUS='0')
+            subprocess.run(['sh', str(launcher), '--argument'], env=env, check=True)
+            self.assertEqual(json.loads((root / 'receipt').read_text()),
+                             dict(backend='riscv', image='/lumi/firmware/wake.rvpack',
+                                  args=['--argument'], trial=None))
+            (root / 'receipt').unlink()
+            result = subprocess.run(['sh', str(launcher)], env=dict(env, DRIVER_STATUS='27'))
+            self.assertEqual(result.returncode, 27)
+            self.assertFalse((root / 'receipt').exists())
+
     def test_voice_disabled_boot_ignores_previously_provisioned_voice(self):
         init = (HERE.parents[1] / 'lumi/board/t33gs-prj008/overlay/etc/init.d/S60lumi-streamer').read_text()
         voice = init[init.index(' voice=/overlay/lumi-voice'):init.index(' # Keep the lightweight recorder')]
@@ -109,7 +178,10 @@ class PipelineTests(unittest.TestCase):
             copying.write_text('kernel license')
             target = root / 'target'
             import os
-            env = dict(os.environ, T33_RUNTIME_DIR=str(runtime), T33_KERNEL_COPYING=str(copying))
+            payload = root / 'wake.rvpack'
+            payload.write_bytes(b'source-built wake payload')
+            env = dict(os.environ, T33_RUNTIME_DIR=str(runtime), T33_KERNEL_COPYING=str(copying),
+                       T33_RISCV_IMAGE=str(payload))
             script = HERE.parents[1] / 'lumi/scripts/install-t33-runtime.sh'
             def install():
                 files = sorted(p for p in runtime.rglob('*') if p.is_file() and p.name != 'SHA256SUMS')
@@ -120,9 +192,11 @@ class PipelineTests(unittest.TestCase):
             install()
             self.assertEqual((target / 'lumi/bin/relay-agent.t33gs').read_bytes(), b'relay')
             self.assertTrue((target / 'lumi/bin/ipc-voice-worker').is_file())
+            self.assertEqual((target / 'lumi/firmware/wake.rvpack').read_bytes(), payload.read_bytes())
             voice.unlink()
             install()
             self.assertFalse((target / 'lumi/bin/ipc-voice-worker').exists())
+            self.assertFalse((target / 'lumi/firmware/wake.rvpack').exists())
             (runtime / 'relay-key.json').write_text('private fixture identity')
             with self.assertRaises(subprocess.CalledProcessError):
                 install()
@@ -137,25 +211,29 @@ class PipelineTests(unittest.TestCase):
             voice = package / 'source/lumi-ipc-streamer/scripts/build_voice_runtime.sh'
             voice.parent.mkdir()
             voice.write_text('#!/bin/sh\nRECEIPT="$RECEIPT.voice" make\n')
+            (voice.parent / 'build_wakeword_riscv.sh').write_text('#!/bin/sh\nexit 0\n')
             tools = root / 'tools'
             tools.mkdir()
             (tools / 'cmake').write_text('#!/bin/sh\nexit 0\n')
             (tools / 'cmake').chmod(0o755)
             (tools / 'make').write_text(
-                '#!/usr/bin/env python3\nimport os,json\n'
+                '#!/usr/bin/env python3\nimport os,json,sys,pathlib\n'
+                'for arg in sys.argv[1:]:\n'
+                ' if arg.startswith("BUILD_DIR="):\n'
+                '  p=pathlib.Path(arg.split("=",1)[1]);p.mkdir(parents=True,exist_ok=True);(p/"wake.rvpack").write_bytes(b"built")\n'
                 'json.dump({k:os.environ.get(k) for k in '
                 '["T33GS_GATEWAY_DMA_AES","T33GS_GATEWAY_DMA_GCM_BATCH",'
-                '"T33GS_GATEWAY_DMA_GCM_MXU2","GIT_DIR"]},open(os.environ["RECEIPT"],"w"))\n')
+                '"T33GS_GATEWAY_DMA_GCM_MXU2","T33GS_VOICE_WAKE_BACKEND","GIT_DIR"]},open(os.environ["RECEIPT"],"w"))\n')
             (tools / 'make').chmod(0o755)
             env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'],
                        LUMI_RUNTIME_BUILD=str(package), LUMI_WORKSPACE=str(root),
                        T33GS_MUSL_TOOLCHAIN=str(root), T33GS_UCLIBC_TOOLCHAIN=str(root),
-                       LUMI_BUILD_VOICE='0', LUMI_INPUTS=str(root),
+                       LUMI_BUILD_VOICE='0', LUMI_INPUTS=str(root), RISCV_PREFIX='/usr/bin/',
                        T33GS_GATEWAY_DMA_AES='0', T33GS_GATEWAY_DMA_GCM_BATCH='0',
                        T33GS_GATEWAY_DMA_GCM_MXU2='0', GIT_DIR='.', RECEIPT=str(root / 'receipt'))
             expected = {
                 'T33GS_GATEWAY_DMA_AES': '1', 'T33GS_GATEWAY_DMA_GCM_BATCH': '1',
-                'T33GS_GATEWAY_DMA_GCM_MXU2': '1', 'GIT_DIR': None}
+                'T33GS_GATEWAY_DMA_GCM_MXU2': '1', 'T33GS_VOICE_WAKE_BACKEND': None, 'GIT_DIR': None}
             for enabled in ('0', '1'):
                 with self.subTest(voice=enabled):
                     subprocess.run(
@@ -163,7 +241,8 @@ class PipelineTests(unittest.TestCase):
                         env=dict(env, LUMI_BUILD_VOICE=enabled), check=True)
                     self.assertEqual(json.loads((root / 'receipt').read_text()), expected)
                     if enabled == '1':
-                        self.assertEqual(json.loads((root / 'receipt.voice').read_text()), expected)
+                        self.assertEqual(json.loads((root / 'receipt.voice').read_text()),
+                                         dict(expected, T33GS_VOICE_WAKE_BACKEND='riscv'))
 
     def test_gateway_profile_rejects_crypto_downgrade_and_stale_elf(self):
         spec = importlib.util.spec_from_file_location(

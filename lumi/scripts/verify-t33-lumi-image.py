@@ -22,6 +22,35 @@ REQUIRED = ('ipc-stream-core', 'ipc-stream-services',
             'lumi-t33gs-relay-agent', 'utilization',
             'lumi-t33gs-motor-gpio-init')
 
+def check_riscv_voice(lumi):
+    worker = lumi / 'bin/ipc-voice-worker'
+    payload = lumi / 'firmware/wake.rvpack'
+    if not worker.exists():
+        if payload.exists():
+            raise ValueError('orphan RISC-V wake payload without voice worker')
+        return
+    if b'/dev/lumi-riscv-mem' not in worker.read_bytes():
+        raise ValueError('voice worker lacks the RISC-V backend')
+    wrapper = lumi / 'bin/lumi-voice-riscv'
+    if not wrapper.is_file() or not wrapper.stat().st_mode & 0o111:
+        raise ValueError('missing RISC-V voice launcher')
+    subprocess.run(['/bin/sh', '-n', str(wrapper)], check=True)
+    data = payload.read_bytes()
+    if len(data) < 96:
+        raise ValueError('truncated RISC-V wake payload')
+    magic, version, base, region, size, entry, shared, count = struct.unpack_from('<8I', data)
+    if (magic, version, region, entry, shared) != (0x33565752, 1, 0x100000, 0x80, 0xff000):
+        raise ValueError('invalid RISC-V wake payload ABI/layout')
+    if base % 4096 or not 0x80 < size <= shared or len(data) != 96 + size + count * 12:
+        raise ValueError('invalid RISC-V wake payload bounds')
+    if (hashlib.sha256(data[96:96+size]).digest() != data[32:64] or
+            hashlib.sha256(data[96+size:]).digest() != data[64:96]):
+        raise ValueError('RISC-V wake payload checksum mismatch')
+    for offset in range(96 + size, len(data), 12):
+        kind, address, _ = struct.unpack_from('<3I', data, offset)
+        if kind not in (1, 26, 27, 28, 35, 39) or address % 2 or address + 4 > size:
+            raise ValueError('invalid RISC-V wake relocation')
+
 def check(root, kernel_release='4.4.94-lumi-t33gs'):
     # A mountable image can still be unbootable if the external toolchain's
     # float mode selects a loader absent from its own sysroot.
@@ -58,6 +87,7 @@ def check(root, kernel_release='4.4.94-lumi-t33gs'):
         if enabled and not profile['hardware'][key]:
             raise ValueError(f'unsupported default module: {key}')
     optional = ('ipc-voice-worker',) if (lumi / 'bin/ipc-voice-worker').exists() else ()
+    check_riscv_voice(lumi)
     for name in REQUIRED + optional:
         path = lumi / 'bin' / name
         if not path.is_file() or not path.stat().st_mode & 0o111:
@@ -103,7 +133,8 @@ def check(root, kernel_release='4.4.94-lumi-t33gs'):
     if os.readlink(root / 'opt/ingenic-t33/lib') != '/lumi/lib': raise ValueError('SDK compatibility link invalid')
     for name in ('libimp.so', 'ld-uClibc-0.9.33.2.so'):
         if not (lumi / 'lib' / name).is_file(): raise ValueError(f'missing SDK library: {name}')
-    for name in ('lumi_motor.ko', 'tnpu.ko'):
+    modules = ('lumi_motor.ko', 'tnpu.ko') + (('lumi_riscv_mem.ko',) if optional else ())
+    for name in modules:
         data = (root / 'lib/modules' / kernel_release / 'ingenic' / name).read_bytes()
         vermagic = kernel_release + ' '
         if ('vermagic=' + vermagic).encode() not in data:

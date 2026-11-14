@@ -12,6 +12,7 @@ endef
 
 define LUMI_T33_RUNTIME_INSTALL_TARGET_CMDS
 	T33_RUNTIME_DIR="$(@D)/source/lumi-ipc-streamer/target/artifacts/t33gs-runtime" \
+	 T33_RISCV_IMAGE="$(@D)/riscv-wakeword/wake.rvpack" \
 	 T33_KERNEL_COPYING="$(LUMI_T33_PLATFORM_DIR)/sdk-build/sdk/kernel-4.4.94/COPYING" \
 	 bash $(BR2_EXTERNAL_LUMI_PATH)/scripts/install-t33-runtime.sh $(TARGET_DIR)
 endef
