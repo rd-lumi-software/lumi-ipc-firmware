@@ -16,6 +16,7 @@
   "defaults": {
     "generation": 0,
     "camera_name": "lumi",
+    "utc_offset_minutes": 420,
     "stream_enabled": true,
     "audio_capture_enabled": true,
     "talkback_enabled": true,
