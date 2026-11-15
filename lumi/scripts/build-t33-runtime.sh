@@ -24,10 +24,13 @@ export WAKEWORD_BUILD_JOBS=$CARGO_BUILD_JOBS SNAPSHOT_BUILD_JOBS=$CARGO_BUILD_JO
 # Voice also builds the gateway: select the same profile before either entrypoint.
 # The preceding full firmware enabled all three; gateway defaults enable DMA only.
 export T33GS_GATEWAY_DMA_AES=1 T33GS_GATEWAY_DMA_GCM_BATCH=1 T33GS_GATEWAY_DMA_GCM_MXU2=1
+# Opus encode is CPU-bound on Xburst; retain fixed-point controls and use its
+# supported MIPS32 ISA, without enabling the upstream DSPR2 assembly path.
 cmake -S "$root/source/opus" -B "$root/opus" -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=mips \
   -DCMAKE_C_COMPILER="$T33GS_MUSL_TOOLCHAIN/bin/mipsel-linux-muslsf-gcc" \
   -DCMAKE_INSTALL_PREFIX="$T33GS_NATIVE_PREFIX/opus" -DCMAKE_INSTALL_LIBDIR=lib \
-  -DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_SHARED_LIBS=OFF -DOPUS_FIXED_POINT=ON \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-march=mips32 -mtune=mips32" \
+  -DBUILD_SHARED_LIBS=OFF -DOPUS_FIXED_POINT=ON \
   -DOPUS_BUILD_TESTING=OFF -DOPUS_BUILD_PROGRAMS=OFF
 cmake --build "$root/opus" --parallel "$CARGO_BUILD_JOBS"
 cmake --install "$root/opus"

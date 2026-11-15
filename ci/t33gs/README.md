@@ -26,6 +26,13 @@ Mỗi SHA phải đủ 40 ký tự hex, không nhận `main`, branch hay tag di 
 Các dependency mà script streamer tải như FFmpeg, zlib, JPEG và FDK-AAC dùng
 pin của chính commit streamer đó. Cargo dùng lockfile.
 
+Opus cho gateway T33 dùng fixed-point, CMake Release (`-O3`) và
+`-march=mips32 -mtune=mips32` ở cả recipe Buildroot và legacy. Phép đo cùng
+source trên T33gs xác nhận giảm CPU encode và giữ nguyên bitstream trên các
+fixture đã kiểm. Không bật DSPR2 assembly hoặc fast-math, không đổi bitrate,
+complexity hay frame duration. Rust gateway vẫn giữ profile tối ưu kích thước;
+đây là lựa chọn build riêng cho thư viện Opus, không phải `-O3` toàn firmware.
+
 ## Thiết lập GitHub Actions
 
 Đăng ký runner Linux x86-64 có Docker, Python >= 3.10, Git và jq, với label

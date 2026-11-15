@@ -41,11 +41,13 @@ bash "$fw/contrib/build-t33gs-k4494.sh" --all
  CROSS_COMPILE="$T33_TOOLCHAIN_ROOT/bin/mips-linux-uclibc-" bash build.sh PRJ008_n_sfcnor_config)
 
 # Build the gateway's native dependency with the same static soft-float ABI.
+# Match the qualified MIPS32/O3 library used by the Buildroot runtime recipe.
 opus="$LUMI_WORKSPACE/opus"
 cmake -S "$opus" -B "$out/opus" -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=mips \
   -DCMAKE_C_COMPILER="$T33GS_MUSL_TOOLCHAIN/bin/mipsel-linux-muslsf-gcc" \
   -DCMAKE_INSTALL_PREFIX="$T33GS_NATIVE_PREFIX/opus" -DCMAKE_INSTALL_LIBDIR=lib \
-  -DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_SHARED_LIBS=OFF -DOPUS_FIXED_POINT=ON \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-march=mips32 -mtune=mips32" \
+  -DBUILD_SHARED_LIBS=OFF -DOPUS_FIXED_POINT=ON \
   -DOPUS_BUILD_TESTING=OFF -DOPUS_BUILD_PROGRAMS=OFF
 cmake --build "$out/opus" --parallel "$T33_BUILD_JOBS"
 cmake --install "$out/opus"
