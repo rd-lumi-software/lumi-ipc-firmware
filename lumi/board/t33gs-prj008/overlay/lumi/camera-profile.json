@@ -28,6 +28,7 @@
       "pre_event_seconds": 10,
       "post_event_seconds": 20,
       "prebuffer_bytes": 4194304,
+      "quota_mode": "auto",
       "quota_bytes": 2147483648,
       "audio_enabled": true
     },

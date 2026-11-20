@@ -11,6 +11,27 @@ RELAY_KEY="/overlay/relay-key.json"
 NETWORK_CONFIG="/overlay/network.env"
 RELAY_PIDFILE="/var/run/lumi-t33gs-relay-agent.pid"
 
+trim_runtime_log() {
+	# Writers inherit O_APPEND. Keep their inode open: rename/unlink rotation
+	# would leave them growing an invisible tmpfs file. Diagnostics are best
+	# effort; a trim can split/interleave a line at this boundary.
+	log=$1
+	[ -f "$log" ] && [ ! -L "$log" ] || return 0
+	bytes=$(stat -c '%s' "$log" 2>/dev/null) || return 0
+	[ "$bytes" -gt 2097152 ] || return 0
+	snapshot="$log.trim.$$"
+	(umask 077; tail -c 1048576 "$log" > "$snapshot") || {
+		rm -f "$snapshot"
+		return 0
+	}
+	# Append retained data after truncation, rather than overwriting bytes
+	# concurrently appended by the runtime.
+	: > "$log"
+	cat "$snapshot" >> "$log"
+	rm -f "$snapshot"
+	printf '\ncomponent=runtime-log event=trimmed previous_bytes=%s retained_bytes=1048576\n' "$bytes" >> "$log"
+}
+
 wlan_ip() {
 	# Keep the RTSP listener tied to a live Wi-Fi link. Linux can retain its
 	# DHCP address after wlan0 is administratively down or loses association.
@@ -49,6 +70,7 @@ watch() {
 	trap 'exit 0' HUP INT TERM
 	last_ip=""
 	while :; do
+		trim_runtime_log /tmp/lumi-streamer.log
 		[ ! -r /tmp/lumi-boot.env ] || { set -a; . /tmp/lumi-boot.env; set +a; }
 		RELAY_KEY="${LUMI_RELAY_KEY:-/overlay/relay-key.json}"
 		current_ip=$(wlan_ip)

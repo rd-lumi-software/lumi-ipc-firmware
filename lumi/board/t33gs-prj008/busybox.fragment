@@ -1,0 +1,2 @@
+# Reread the SD partition table after explicit full-card format.
+CONFIG_BLOCKDEV=y
