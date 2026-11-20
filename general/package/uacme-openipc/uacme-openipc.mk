@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-UACME_OPENIPC_VERSION = 1.2.4
+UACME_OPENIPC_VERSION = 1.8.1
 # Released versions are on branch upstream/latest, tagged as
 # upstream/X.Y.Z Do not use vX.Y.Z tags from master, as they do not
 # include .tarball-version
@@ -26,5 +26,11 @@ UACME_OPENIPC_CONF_OPTS += --with-ualpn
 else
 UACME_OPENIPC_CONF_OPTS += --without-ualpn
 endif
+
+# nsupdate.sh is the DNS-01 hook for BIND's nsupdate, which no image ships.
+define UACME_OPENIPC_REMOVE_NSUPDATE_HOOK
+	rm -f $(TARGET_DIR)/usr/share/uacme/nsupdate.sh
+endef
+UACME_OPENIPC_POST_INSTALL_TARGET_HOOKS += UACME_OPENIPC_REMOVE_NSUPDATE_HOOK
 
 $(eval $(autotools-package))

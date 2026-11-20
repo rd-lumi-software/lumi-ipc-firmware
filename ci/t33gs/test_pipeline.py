@@ -318,7 +318,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(firmware.overlay_inventory(root)['etc/config']['source'], 'lumi/overlay')
 
     def test_board_updater_retains_ram_flash_and_checks_identity(self):
-        source = (HERE.parents[1] / 'general/overlay/usr/sbin/sysupgrade').read_text()
+        source = (HERE.parents[1] / 'lumi/overlay/usr/sbin/sysupgrade').read_text()
         result = firmware.adapt_updater(source)
         self.assertIn('enter_ramfs()', result)
         self.assertIn('skip_selfupdate=1', result)
@@ -338,7 +338,7 @@ class PipelineTests(unittest.TestCase):
             subprocess.run(['/bin/sh', '-n', script.name], check=True)
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp) / 'lumi-sysupgrade'
-            cli('install-updater', HERE.parents[1] / 'general/overlay/usr/sbin/sysupgrade',
+            cli('install-updater', HERE.parents[1] / 'lumi/overlay/usr/sbin/sysupgrade',
                 destination)
             self.assertEqual(destination.read_text(), result)
             self.assertEqual(destination.stat().st_mode & 0o777, 0o755)
@@ -346,7 +346,7 @@ class PipelineTests(unittest.TestCase):
             firmware.adapt_updater(source.replace('vendor=$(ipcinfo -v)', 'vendor=changed'))
 
     def test_updater_accepts_current_map_and_rejects_old_rootfs_layout(self):
-        source = (HERE.parents[1] / 'general/overlay/usr/sbin/sysupgrade').read_text()
+        source = (HERE.parents[1] / 'lumi/overlay/usr/sbin/sysupgrade').read_text()
         guard = firmware.adapt_updater(source).split('free_resources() {', 1)[1].split(
             '/etc/init.d/S61lumi-streamer-watch stop', 1)[0]
         with tempfile.TemporaryDirectory() as temp:

@@ -9,23 +9,32 @@ implement the same 8-phase half-step sequence and the same
 `<pan> <tilt> <delay_ms>` command signature, so they can be compared 1:1. The
 difference: `gpio-motors` writes `/sys/class/gpio` from userspace, whereas
 `gpiostep` does `gpio_set_value()` directly in kernel context, which skips the
-per-write syscall cost. Timing granularity is the same for both: the kernels
-that ship this package have no high-resolution timers, so any sleep rounds up
-to a whole 10ms tick. Delays under a quarter tick therefore busy-wait between
-scheduler yields in `gpiostep` (see `step_delay()` in `src/gpiostep.c`); longer
-ones sleep and accept the rounding. The sub-tick pacing holds on an idle core:
-under load the yield after each micro-step can hand the core away for several
-ticks.
+per-write syscall cost.
+
+Timing depends on the kernel. The gk7205v500 kernel has high-resolution timers,
+so every microstep delay is a precise sleep: a pan costs the CPU next to
+nothing, and both axes run at the rate their delays ask for. On a kernel
+without them any sleep rounds up to a whole 10ms tick, so delays under a quarter
+tick busy-wait between scheduler yields (see `step_delay()` in
+`src/gpiostep.c`) and longer ones sleep and accept the rounding. There a pan at
+the GK7205V510's 2ms delay keeps the CPU busy for as long as it lasts, and the
+sub-tick pacing only holds on an idle core.
 
 ### Load
 
 ```
-insmod /lib/modules/$(uname -r)/extra/gpiostep.ko          # GK7205V510 defaults
+insmod /lib/modules/$(uname -r)/extra/gpiostep.ko          # GK7205V510 defaults (Goke builds)
 # or override the pin map:
 insmod gpiostep.ko pan_gpios=3,4,72,73 tilt_gpios=69,59,58,57
 ```
 
 The module creates `/dev/motorDev`.
+
+Only a Goke build has a default pin map, the GK7205V510's above. On any other
+SoC those GPIO numbers are other pads, so a build for it has none, and an
+`insmod` or `/etc/modules` line without `pan_gpios` and `tilt_gpios` (or
+`sr_gpios`) is refused before it claims a pin:
+`gpiostep: no pin map: name the board's pan_gpios and tilt_gpios (or sr_gpios)`.
 
 ### Use
 
@@ -42,3 +51,85 @@ A "step" is one full 8-phase cycle, matching `gpio-motors`. The default pin map
 `/proc/devcfg` motor block on a GK7205V510. If a coil phase is reversed or
 motion is rough, try the vendor coil order `[0,2,1,3]`:
 `pan_gpios=3,72,4,73 tilt_gpios=69,58,59,57`.
+
+### Anyka AK3918EV200, Gwell pan/tilt (SC1345)
+
+```
+insmod gpiostep.ko pan_gpios=15,14,13,23 tilt_gpios=19,20,10,11
+```
+
+Decoded from the stock `presetmotor.ko` (its `vSetpMotorGPIO_init`), and
+checked on the camera: the first four pins pan it and the last four tilt it, in
+this coil order, and a positive tilt points it up. The module switches the
+eight pads to GPIO itself: the EV200 pinctrl muxes a pad when
+`gpio_direction_output()` claims it, and leaves SHAREPIN_CON2 with the value
+the stock driver writes. Use a delay of 2 ms or more: at 1 ms a pan loses steps
+(24-32 px off after 100 steps out and back), at 2 ms three such moves land
+where they started.
+
+### Coils on a 74HC595 shift register
+
+Some heads do not wire the eight coil lines to SoC pins. They clock the coil
+states into a 74HC595 over three GPIOs, and the register latches them onto its
+outputs Q0-Q7. Naming those three pins switches the module to that wiring:
+
+```
+modprobe gpiostep sr_gpios=53,47,52                                   # sck, si, rck
+modprobe gpiostep sr_gpios=53,47,52 pan_bits=0,1,2,3 tilt_bits=4,5,6,7  # same, spelled out
+```
+
+| parameter | default | |
+|---|---|---|
+| `sr_gpios` | unset | serial clock (SH_CP), serial data (DS) and latch (ST_CP) GPIOs; setting it selects this mode |
+| `pan_bits` | 0,1,2,3 | register outputs (0-7 = Q0-Q7) of the pan coil's a, b, c, d |
+| `tilt_bits` | 4,5,6,7 | the same for the tilt coil |
+
+The two axes share one shadow byte under a spinlock, so a move on one axis
+never undoes the other's coils. Every micro-step shifts all eight bits out, Q7
+first, and latches them: 26 GPIO writes and 1.8 us of `ndelay()` with
+interrupts off. The register's outputs are undefined after power-on and can
+leave a coil energised, so loading the module clears it. The module refuses to
+load if the eight `pan_bits` and `tilt_bits` are not eight different outputs,
+or if one of `sr_gpios` sits on a controller whose writes can sleep (an I2C or
+SPI expander), since the shifting runs with interrupts off. `pan_gpios` and
+`tilt_gpios` are not used in this mode, and `pan_bits` and `tilt_bits` without
+`sr_gpios` are ignored with a warning; `/dev/motorDev`, the ioctl, the ramp
+and `hold_ms` are the same in both.
+
+The example is the Heimlink HM202 (SigmaStar SSC325, whose vendor kernel has a
+"74HC595 ptz device driver"): SoC GPIOs 53, 47 and 52, pan on Q0-Q3, tilt on
+Q4-Q7, the same 8-phase half-step sequence. A line
+`gpiostep sr_gpios=53,47,52` in `/etc/modules` loads it at boot.
+
+### Speed and the acceleration ramp
+
+A move from rest starts at `ramp_start_us` per micro-step and accelerates to
+the delay it asked for over `ramp_microsteps` micro-steps; a delay of
+`ramp_start_us` or longer runs flat. A move in the same direction that follows
+the previous one within two micro-step periods carries on at its speed, so a
+caller driving continuous motion as a train of short moves is not slowed to the
+start rate by every one. The coils stay energised for `hold_ms` after a move,
+which holds the rotor where the last micro-step left it, and are released after
+that.
+
+| parameter | default | |
+|---|---|---|
+| `ramp_start_us` | 2000 | delay a move from rest starts at; 0 turns the ramp off |
+| `ramp_microsteps` | 64 | micro-steps to reach the requested delay |
+| `hold_ms` | 20 | how long the coils stay on after a move |
+
+All three are writable at runtime under `/sys/module/gpiostep/parameters/`.
+
+Measured on a GK7205V510 pan/tilt head (40-step moves out and back, residual
+position read from the picture):
+
+| delay per micro-step | without the ramp | with the ramp |
+|---|---|---|
+| 833 us and slower | no steps lost | no steps lost |
+| 767 us | no steps lost | — |
+| 700 us | 2-22 steps lost per run | no steps lost |
+| 650 us | — | no steps lost (256-micro-step ramp) |
+| 600 us | — | steps lost |
+
+So the ramp moves the limit from the start-up rate to the rate the motors can
+run at, around 650 us here. 833 us (about 125 steps per second) leaves margin.

@@ -3,16 +3,17 @@
 
 get_env() {
   bootargs=$(fw_printenv -n bootargs)
-  mem=$(echo ${bootargs} | awk -F '=' '$1=="mem"{print $2}' RS=' ')
-  console=$(echo ${bootargs} | awk -F '=' '$1=="console"{print $2}' RS=' ')
-  panic=$(echo ${bootargs} | awk -F '=' '$1=="panic"{print $2}' RS=' ')
-  rootfstype=$(echo ${bootargs} | awk -F '=' '$1=="rootfstype"{print $2}' RS=' ')
-  root=$(echo ${bootargs} | awk -F '=' '$1=="root"{print $2}' RS=' ')
-  init=$(echo ${bootargs} | awk -F '=' '$1=="init"{print $2}' RS=' ')
-  mtdparts=$(echo ${bootargs} | awk -F '=' '$1=="mtdparts"{print $2}' RS=' ')
+  # Everything already on the command line except the three arguments this
+  # script decides, in the order it was in. The script used to rebuild
+  # bootargs from a fixed list of keys instead, and silently dropped whatever
+  # was not on it -- ubi.mtd among them, so the next boot of a NAND/UBI board
+  # could not attach ubi0 and panicked mounting its root (#2281).
+  # Keys the extras variable sets are left to it, so a second run does not
+  # carry two copies.
+  extras=$(fw_printenv -n extras)
+  kept=$(echo ${bootargs} | awk -v extras="${extras}" 'BEGIN { RS = " "; n = split(extras, e, " "); for (i = 1; i <= n; i++) { k = e[i]; sub(/=.*/, "", k); skip[k] = 1 } skip["mem"] = skip["mmz"] = skip["mmz_allocator"] = skip["osmem"] = 1 } { sub(/\n$/, ""); k = $0; sub(/=.*/, "", k); if ($0 != "" && !(k in skip)) printf "%s ", $0 }')
   osmem=$(fw_printenv -n osmem)
   totalmem=$(fw_printenv -n totalmem)
-  extras=$(fw_printenv -n extras)
 }
 
 calc_mmz() {
@@ -27,11 +28,66 @@ calc_mmz() {
 }
 
 
+# A kernel with goke_mem measures DRAM and picks the allocator and the OS share
+# itself, at every boot, under any bootloader; nothing has to be written for a
+# camera to come up right. Here the user overrides it: mmz_allocator= and
+# osmem= go on the command line, which that kernel reads, and mem= stays the
+# OS share for a kernel without it. `auto` drops the override.
+if [ -d /sys/module/goke_mem/parameters ] && [ -n "$(cat /sys/module/goke_mem/parameters/allocator 2>/dev/null)" ]; then
+  p=/sys/module/goke_mem/parameters
+  case "$1" in
+  gk|cma|auto)
+    get_env
+    os=${2:-${osmem:-32M}}
+    if [ "$1" = auto ]; then
+      newbootargs="mem=${os} ${kept}${extras}"
+    elif [ "$1" = cma ]; then
+      # The zone written out, with mem= the whole DRAM: the form a kernel
+      # without the probe needs to pick cma, which this kernel takes as an
+      # explicit layout. Whole 4 MiB units, as CMA reserves them.
+      dram=$(cat $p/dram)
+      osm=$(( ($(echo ${os} | tr -d 'M') + 3) / 4 * 4 ))
+      zone=$(printf 'anonymous,0,0x%x,%dM' $(( 0x40000000 + osm * 1048576 )) $(( dram - osm )))
+      newbootargs="mem=${dram}M ${kept}mmz_allocator=cma mmz=${zone} ${extras}"
+    else
+      # mem= is the OS share for a kernel without the probe, osmem= for this one.
+      newbootargs="mem=${os} ${kept}mmz_allocator=gk osmem=${os} ${extras}"
+    fi
+    if ! fw_setenv bootargs ${newbootargs}; then
+      echo "Could not write bootargs; nothing changes at the next boot."
+      exit 1
+    fi
+    echo ${newbootargs}
+    echo "Applies at the next boot. Now: DRAM $(cat $p/dram)M, OS $(cat $p/osmem)M, $(cat $p/allocator), mmz=$(cat $p/mmz)"
+    exit 0
+    ;;
+  mmz)
+    cat $p/mmz
+    exit 0
+    ;;
+  *)
+    echo "Usage: set_allocator gk|cma [osmem] | auto | mmz"
+    echo "Now: DRAM $(cat $p/dram)M, OS $(cat $p/osmem)M, $(cat $p/allocator), mmz=$(cat $p/mmz)"
+    exit 1
+    ;;
+  esac
+fi
+
+# The zone `cma` would write, without writing it. The load script compares it
+# with the zone the kernel booted with: bootargs are written once, so an osmem
+# or totalmem changed afterwards never reached them on their own.
+if [ "$1" = 'mmz' ]; then
+  get_env
+  calc_mmz
+  echo "${mmz}"
+  exit 0
+fi
+
 if [[ "$1" == 'gk' ]]; then
   echo "Allocator selected as gk..."
   get_env
   mem=${osmem:=32M}
-  newbootargs="mem=${mem} console=${console} panic=${panic} rootfstype=${rootfstype} root=${root} init=${init} mtdparts=${mtdparts} mmz_allocator=gk ${extras}"
+  newbootargs="mem=${mem} ${kept}mmz_allocator=gk ${extras}"
   echo ${newbootargs}
   fw_setenv bootargs ${newbootargs}
   #
@@ -40,7 +96,7 @@ elif [[ "$1" == 'cma'  ]]; then
   get_env
   calc_mmz
   mem=${totalmem:=64M}
-  newbootargs="mem=${mem} console=${console} panic=${panic} rootfstype=${rootfstype} root=${root} init=${init} mtdparts=${mtdparts} mmz_allocator=cma mmz=${mmz} ${extras}"
+  newbootargs="mem=${mem} ${kept}mmz_allocator=cma mmz=${mmz} ${extras}"
   fw_setenv bootargs ${newbootargs}
   echo ${newbootargs}
 else

@@ -2,7 +2,7 @@
 
 insert_sns() {
     case $SENSOR in
-    sc401ai | sc500ai | sc501ai)
+    imx415 | sc401ai | sc500ai | sc501ai)
         devmem 0xf0220000 32 0x00001473
         devmem 0xF0220004 32 0x10000000
         devmem 0xF0220008 32 0x00048100
@@ -152,12 +152,220 @@ insert_ko() {
     #insmod hdal/kdrv_videoout/fbdev/nvt_fb.ko
 }
 
+proc_cmdline=${LOAD_NOVATEK_CMDLINE:-/proc/cmdline}
+device_tree=${LOAD_NOVATEK_DT:-/proc/device-tree}
+
+# The size cell of a one-address, one-size DT reg property, in MB.
+dt_mb() {
+	[ -r "$1" ] || return 1
+	echo $(( 0x$(hexdump -ve '1/1 "%02x"' "$1" | cut -c9-16) >> 20 ))
+}
+
+# The vendor U-Boot lays memory out from osmem: the DT memory node it hands
+# over ends there and the HDAL pool starts there. The kernel's RAM comes from
+# mem= alone, and the bootcmd these boards were given re-runs the saved
+# bootargs, so an osmem changed later never reaches mem=. Booted with mem=
+# past the node, the kernel owns the start of the HDAL pool and
+# nvtmpp_heap_init in kflow_common panics the camera into a reboot loop.
+# The opposite drift leaves the DT above the kernel's RAM and hangs it before
+# the console, which nothing here can catch. #2107.
+check_mem() {
+	dt_mem=$(dt_mb "$device_tree/memory/reg") || return 0
+	booted_mem=
+	for arg in $(cat "$proc_cmdline"); do
+		case "$arg" in
+		mem=*M)
+			booted_mem=${arg#mem=}
+			booted_mem=${booted_mem%M}
+			break
+			;;
+		esac
+	done
+	case "$booted_mem" in
+	"" | *[!0-9]*) return 0 ;;
+	esac
+	[ "$booted_mem" -gt "$dt_mem" ] || return 0
+
+	logger -s -p daemon.err -t novatek "Kernel booted with mem=${booted_mem}M, past the ${dt_mem}M U-Boot laid out from osmem; HDAL would overwrite kernel memory, not loading it"
+	bootargs=$(fw_printenv -n bootargs 2>/dev/null)
+	case " $bootargs" in
+	*" mem=${booted_mem}M"*)
+		bootargs=$(echo " $bootargs" | sed "s/ mem=${booted_mem}M/ mem=${dt_mem}M/; s/^ //")
+		fw_setenv bootargs "$bootargs" &&
+			logger -s -p daemon.err -t novatek "bootargs set to mem=${dt_mem}M; reboot to load HDAL"
+		;;
+	esac
+	exit 1
+}
+
+# 128 MB boards were set up with osmem=32M, which leaves Linux 25 MB -- one
+# live viewer before majestic's low-memory floor sheds it -- and HDAL a 96 MB
+# pool it does not fill. At 48M Linux has 16 MB more (six viewers measured on
+# an NT98566 + SC501AI) and HDAL still keeps 25 MB free, 14.5 MB with a JPEG
+# path running beside the stream. Moved once, for the next boot: osmem and
+# mem= in one environment write, so they cannot disagree, with osmem_default
+# marking it done, so a split an owner picks afterwards is left as it is.
+# #2107.
+set_default_osmem() {
+	dram=$(dt_mb "$device_tree/nvt_memory_cfg/dram/reg") || return 0
+	[ "$dram" -eq 128 ] || return 0
+	[ -z "$(fw_printenv -n osmem_default 2>/dev/null)" ] || return 0
+	case "$(fw_printenv -n osmem 2>/dev/null)" in
+	"" | 32M) ;;
+	*) return 0 ;;
+	esac
+
+	# Exactly one mem=, and the one that goes with the old split: a second
+	# one, or any other value, is a bootargs somebody wrote by hand, and
+	# moving part of it would leave it disagreeing with itself.
+	bootargs=$(fw_printenv -n bootargs 2>/dev/null)
+	mem=
+	for arg in $bootargs; do
+		case "$arg" in
+		mem=*)
+			[ -z "$mem" ] || return 0
+			mem=$arg
+			;;
+		esac
+	done
+	case "$mem" in
+	'mem=${osmem}' | 'mem=${osmem:-32M}')
+		bootargs=
+		;;
+	mem=32M)
+		bootargs=$(echo " $bootargs" | sed "s/ mem=32M/ mem=48M/; s/^ //")
+		;;
+	*)
+		return 0
+		;;
+	esac
+
+	batch=$(mktemp) || return 0
+	{
+		echo "osmem 48M"
+		[ -n "$bootargs" ] && echo "bootargs $bootargs"
+		echo "osmem_default 48M"
+	} >"$batch"
+	fw_setenv --script "$batch" &&
+		logger -s -p daemon.info -t novatek "Linux memory set to 48M of 128M; applies at the next boot"
+	rm -f "$batch"
+}
+
+# Some sensors answer on I2C only while powered. A Sony part needs its XCLR
+# released and its INCK running, and on Novatek both are the sensor driver's
+# job when the video pipeline opens the sensor -- which is after detection,
+# so detection finds nothing (an IMX415 on the XM IVG-N8S, #1889). When it
+# does, power the sensor the way each driver we ship would, from its own
+# config's [POWER] section: the SIE master clock (CG_CLK_EN_REG0 bit 2,
+# "f0c00000.siemck") and a pulse on its reset pin, then ask again. Only on a
+# failed detection, so a camera that is found today never takes this path,
+# and everything goes back as it was found: the driver powers the sensor up
+# again by itself when majestic opens it.
+#
+# The pads come first. A board whose device tree leaves the sensor pinmux
+# off boots with SN_MCLK not on its pad and I2C_1 not on S_GPIO7/8, so the
+# clock never reaches the sensor and ipcinfo cannot reach it either (the
+# N8S, #1889; its device tree comes from XM's loader in flash, not from
+# us). Route them as the video pipeline will, for the drivers we ship and
+# from their own configs: a SIE MCLK sensor (id_0_mclk 0) gets sensor
+# 0x220, MIPI | MCLK on S_GPIO0, and one on I2C id 0 gets i2c 0x1, I2C_1
+# on S_GPIO7/8 -- adding to what is set, and the old values go back after.
+# I2C id 1 is left alone: its first pads include S_GPIO4, a reset pin.
+# This is done around the first ipcinfo too, not only this fallback: with
+# I2C_1 off its pads that one jams bus 0 ("timeout waiting for bus ready")
+# and the fallback then finds nothing (#1889, on the 2026-11-18 nightly). A
+# board whose pads are already routed writes nothing.
+nvt_pinmux=${LOAD_NOVATEK_PINMUX:-/proc/nvt_info/nvt_pinmux}
+sensor_cfgs=${LOAD_NOVATEK_SENSORS:-/etc/sensors}
+
+pinmux_get() {
+	sed -n "s/^$1{pinmux=<\(0x[0-9a-fA-F]*\)>.*/\1/p" $nvt_pinmux/pinmux_summary
+}
+route_sensor_pads() {
+	local cfg senmux i2cmux
+	pad_sen= pad_i2c=
+	[ -f $nvt_pinmux/pinmux_summary ] || return
+	for cfg in $sensor_cfgs/sen_*.cfg; do
+		[ -f "nvt_$(basename "$cfg" .cfg).ko" ] || continue
+		[ "$(sed -n 's/^id_0_mclk *= *\([0-9a-fA-Fx]*\).*/\1/p' "$cfg")" = 0 ] && senmux=0x220
+		[ "$(sed -n 's/^id_0_i2c_id *= *\([0-9a-fA-Fx]*\).*/\1/p' "$cfg")" = 0 ] && i2cmux=0x1
+	done
+	[ -n "$senmux" ] && pad_sen=$(pinmux_get sensor)
+	[ -n "$i2cmux" ] && pad_i2c=$(pinmux_get i2c)
+	# Nothing to add: nothing written, nothing to put back.
+	[ -n "$pad_sen" ] && [ $((pad_sen | senmux)) = $((pad_sen)) ] && pad_sen=
+	[ -n "$pad_i2c" ] && [ $((pad_i2c | i2cmux)) = $((pad_i2c)) ] && pad_i2c=
+	# One write per command: the proc node takes each write as a whole
+	# command, and busybox printf writes "sensor 0x22" and "0" separately.
+	[ -n "$pad_sen" ] && echo "sensor $(printf 0x%x $((pad_sen | senmux)))" >$nvt_pinmux/pinmux_set
+	[ -n "$pad_i2c" ] && echo "i2c $(printf 0x%x $((pad_i2c | i2cmux)))" >$nvt_pinmux/pinmux_set
+}
+restore_sensor_pads() {
+	[ -n "$pad_i2c" ] && echo i2c $pad_i2c >$nvt_pinmux/pinmux_set
+	[ -n "$pad_sen" ] && echo sensor $pad_sen >$nvt_pinmux/pinmux_set
+}
+probe_powered_sensor() {
+	local clk=0xf0020070 en pins pin cfg name dir val own found
+	for cfg in $sensor_cfgs/sen_*.cfg; do
+		name=$(basename "$cfg" .cfg)
+		[ -f "nvt_$name.ko" ] || continue
+		pin=$(sed -n 's/^id_0_rst_pin *= *\(0x[0-9a-fA-F]*\).*/\1/p' "$cfg")
+		[ -n "$pin" ] && [ "$pin" != 0xFFFFFFFF ] && pins="$pins $((pin))"
+	done
+	pins=$(echo $pins | tr ' ' '\n' | sort -un)
+	[ -n "$pins" ] || return
+	en=$(devmem $clk 32)
+	devmem $clk 32 $((en | 0x4))
+	for pin in $pins; do
+		# A pin someone else exported is put back exactly as found and left
+		# exported; only an export this probe made is released.
+		own=
+		if [ ! -d /sys/class/gpio/gpio$pin ]; then
+			echo $pin >/sys/class/gpio/export || continue
+			own=1
+		fi
+		dir=$(cat /sys/class/gpio/gpio$pin/direction)
+		val=$(cat /sys/class/gpio/gpio$pin/value)
+		echo low >/sys/class/gpio/gpio$pin/direction
+		usleep 1000
+		echo 1 >/sys/class/gpio/gpio$pin/value
+		usleep 2000
+		found=$(ipcinfo --short-sensor)
+		echo 0 >/sys/class/gpio/gpio$pin/value
+		if [ "$dir" = in ]; then
+			echo in >/sys/class/gpio/gpio$pin/direction
+		else
+			echo $val >/sys/class/gpio/gpio$pin/value
+		fi
+		[ -n "$own" ] && echo $pin >/sys/class/gpio/unexport
+		if [ -n "$found" ]; then
+			logger -s -p daemon.info -t novatek "$found answered with its reset (GPIO $pin) released and its clock on"
+			break
+		fi
+	done
+	devmem $clk 32 $en
+	echo $found
+}
+
+check_mem
+set_default_osmem
+
 cd /lib/modules/4.19.91/novatek
 insert_ko
 
 # Sensor config
 # SENSOR=${SENSOR:=imx307}
 #
+
+# A failed probe used to be stored as sensor=unknown, and rcS exports the
+# stored value into SENSOR before this ever runs -- so an already-latched
+# camera arrives here with SENSOR=unknown, takes the "set manually" branch
+# below, and never probes again however the real fault is fixed. Treat it
+# as unset and drop it from the environment so this boot re-detects. #2428.
+if [ "$SENSOR" = "unknown" ]; then
+	SENSOR=
+	fw_setenv sensor
+fi
 
 if [ -n "$SENSOR" ]; then
     logger -s -p daemon.info -t novatek "Manualy set SENSOR as ${SENSOR}"
@@ -168,10 +376,21 @@ else
         logger -s -p daemon.info -t novatek "Get data from environment and set SENSOR as ${SENSOR}"
     else
         #insert_ko
+        route_sensor_pads
         SENSOR_DETECT=$(ipcinfo --short-sensor)
+        [ -n "$SENSOR_DETECT" ] || SENSOR_DETECT=$(probe_powered_sensor)
+        restore_sensor_pads
         export SENSOR=${SENSOR_DETECT:=unknown}
         logger -s -p daemon.info -t novatek "Get data from ipcinfo and set SENSOR as ${SENSOR}"
-        fw_setenv sensor $SENSOR && logger -s -p daemon.info -t novatek "Write detected ${SENSOR} to U-Boot ENV"
+        # Do not persist a failed detection. The fw_printenv branch above wins
+        # whenever `sensor` exists, so writing "unknown" here latches the camera
+        # into "SENSOR is not detected, aborting..." for good -- detection never
+        # runs again and nothing says why. Seen on a GK7202V500 in #2428.
+        # load_ingenic has always cleared the variable instead of storing the
+        # miss; this is the same behaviour, reached by not writing at all.
+        if [ "$SENSOR" != "unknown" ]; then
+        	fw_setenv sensor $SENSOR && logger -s -p daemon.info -t novatek "Write detected ${SENSOR} to U-Boot ENV"
+        fi
     fi
 fi
 

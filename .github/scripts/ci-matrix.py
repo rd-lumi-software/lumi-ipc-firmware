@@ -28,7 +28,9 @@ Usage:
 """
 
 import argparse
+import ast
 import collections
+import datetime
 import glob
 import json
 import os
@@ -55,6 +57,7 @@ ALL_BOARDS = [
     "ssc30kd_lite", "ssc30kq_lite", "ssc338q_lite",
     # Ingenic
     "t10_lite", "t20_lite", "t21_lite", "t30_lite", "t23_lite", "t31_lite", "t40_lite",
+    "t41_lite",
     # Hisilicon [HI3516AV100]
     "hi3516av100_lite", "hi3516av100_neo", "hi3516dv100_lite",
     # Hisilicon [HI3516CV100]
@@ -66,7 +69,7 @@ ALL_BOARDS = [
     # Hisilicon [HI3516CV500]
     "hi3516av300_lite", "hi3516av300_neo", "hi3516cv500_lite", "hi3516dv300_lite",
     # Hisilicon [HI3516CV6XX]
-    "hi3516cv6xx_ultimate",
+    "hi3516cv6xx_lite", "hi3516cv6xx_ultimate",
     # Hisilicon [HI3519DV500]
     "hi3519dv500_ultimate",
     # Hisilicon [HI3516EV200]
@@ -75,7 +78,7 @@ ALL_BOARDS = [
     # Hisilicon [HI3519V101]
     "hi3516av200_lite", "hi3516av200_neo", "hi3519v101_lite",
     # Hisilicon [misc]
-    "hi3520dv200_lite", "hi3536cv100_lite", "hi3536dv100_lite",
+    "hi3520dv200_lite", "hi3520dv200_neo", "hi3536cv100_lite", "hi3536dv100_lite",
     # Goke [GK710X]
     "gk7102_lite", "gk7102s_lite",
     # Goke [GK7205V200]
@@ -83,11 +86,34 @@ ALL_BOARDS = [
     # via gk7205v200's BR2_OPENIPC_SOC_ALIASES (manifest @alias).
     "gk7202v300_lite", "gk7205v200_lite", "gk7205v300_lite", "gk7605v100_lite",
     # Goke [GK7205V500]
-    "gk7201v200_lite", "gk7205v500_lite", "gk7205v510_lite",
+    # gk7205v510 is firmware-identical to gk7205v500 --- built once and served
+    # via gk7205v500's BR2_OPENIPC_SOC_ALIASES (manifest @alias).
+    "gk7201v200_lite", "gk7205v500_lite",
+    # Goke [GK7206V100]
+    # gk7206v10/v10b/v11/v11at/v12a are firmware-identical to gk7206v11a ---
+    # served via gk7206v100's BR2_OPENIPC_SOC_ALIASES (manifest @alias).
+    "gk7206v100_lite",
+    # Ambarella
+    "s3l_ultimate",
     # Allwinner
     "v851s_lite",
+    # Anyka [AK3918EV300]
+    # One 4.4.302 kernel and toolchain for every AK39 part. ak3918av130_lite
+    # is in UNBUILT_BOARDS until its prebuilt SDK modules have run on a camera.
+    "ak3910_lite", "ak3918_lite", "ak3918ev200_lite", "ak3918ev300_lite",
+    "ak3916ev300_lite", "ak3918ev330_lite", "ak3918ev331_lite",
+    # Anyka [AK3918AV100]
+    # The AnyCloud39AV100 SDK's own 4.4.282 kernel (OpenIPC/linux#208) and its
+    # prebuilt modules. They have booted only in qemu-bench; the image is
+    # published so that owners of these cameras can be the first to run it,
+    # which an unbuilt board can never get.
+    "ak3918av100_lite", "ak3918av100x_lite", "ak3918ev300l_lite",
     # Fullhan
-    "fh8852v100_lite", "fh8852v200_lite",
+    "fh8833v100_lite", "fh8852v100_lite", "fh8856v100_lite",
+    "fh8852v200_lite", "fh8852v210_lite", "fh8856v200_lite", "fh8856v210_lite",
+    "fh8858v200_lite", "fh8858v210_lite",
+    # FH865x share the fullhan-fh8852v200 kernel and toolchain
+    "fh8626v100_lite", "fh8652_lite", "fh8656_lite", "fh8658_lite",
     # Grainmedia
     "gm8135_lite", "gm8136_lite",
     # Novatek
@@ -98,10 +124,12 @@ ALL_BOARDS = [
     # xm550 is firmware-identical to xm530 --- built once and served via
     # xm530's BR2_OPENIPC_SOC_ALIASES (manifest @alias).
     "xm510_lite", "xm530_lite",
+    # The V200 series: the xm530 family's kernel, built per chip.
+    "xm530v200_lite", "xm533_lite", "xm535d1_lite", "xm535d2_lite", "xm535w1_lite",
     # Ultimate
     "ssc333_ultimate", "ssc335_ultimate", "ssc335de_ultimate", "ssc337_ultimate",
     "ssc337de_ultimate", "ssc30kd_ultimate", "ssc30kq_ultimate", "ssc338q_ultimate",
-    "t20_ultimate", "t21_ultimate", "t31_ultimate", "t40_ultimate",
+    "t20_ultimate", "t21_ultimate", "t31_ultimate", "t40_ultimate", "t41_ultimate",
     "hi3516av100_ultimate", "hi3516dv100_ultimate", "hi3518ev200_ultimate",
     "hi3516cv300_ultimate", "hi3516ev200_ultimate", "hi3516ev300_ultimate",
     "hi3518ev300_ultimate", "hi3516av200_ultimate",
@@ -139,31 +167,39 @@ UNBUILT_BOARDS = {
     "hi3516ev300_glibc": "variant 'glibc', not a standard matrix variant",
     "t31glibc_lite": "glibc toolchain variant of t31_lite",
 
+    # Real, and built locally. The other Anyka boards build every driver from
+    # source; this one's ISP, encoder, Ethernet and SD drivers are the
+    # AnyCloud39AV130 SDK's prebuilt modules, matched to the family kernel by
+    # vermagic and a struct-layout probe rather than by a boot (see
+    # general/package/anyka-osdrv-ak3918av130/anyka-osdrv-ak3918av130.mk). It
+    # joins ALL_BOARDS once those modules have run on an AV130 camera.
+    "ak3918av130_lite": "prebuilt SDK modules not yet run on an AV130 camera",
+
     # Not firmware images at all: no BR2_OPENIPC_VARIANT, so nothing the repack
     # step or the manifest knows how to name.
     "hi3519dv500_toolchain": "toolchain config, produces no firmware image",
+    # Axera's toolchain configs publish toolchain.axera-ax620{e,u} (#2852) for
+    # the ax620e_lite and ax620u_lite boards, which are in WEEKLY_BOARDS.
+    "ax620e_toolchain": "toolchain config, produces no firmware image",
+    "ax620u_toolchain": "toolchain config, produces no firmware image",
+    # T41 publishes its toolchain ahead of its boards (#2877), whose build
+    # needs toolchain.ingenic-t41 to exist.
+    "t41_toolchain": "toolchain config, produces no firmware image",
     "s2l22m_lite": "no variant set; Ambarella S2L has no board directory",
     "s2l33m_lite": "no variant set; Ambarella S2L has no board directory",
 
-    # These are real boards, and this is a COST decision rather than a technical
-    # one, so it is the entry most worth arguing with. Every one of them sets
-    # BR2_TOOLCHAIN_BUILDROOT_MUSL instead of BR2_TOOLCHAIN_EXTERNAL: it
-    # compiles a GCC and a musl from source before it starts on the firmware,
-    # tens of minutes each, against ~6 for a board that downloads its toolchain.
-    # Adding all seven would cost more runner time than a large part of the rest
-    # of the matrix, on every PR that touches a shared path.
+    # A real board, and this is a COST decision rather than a technical one, so
+    # it is the entry most worth arguing with. It sets BR2_TOOLCHAIN_BUILDROOT_MUSL
+    # instead of BR2_TOOLCHAIN_EXTERNAL: it compiles a GCC and a musl from source
+    # before it starts on the firmware, tens of minutes, against ~6 for a board
+    # that downloads its toolchain. The six Fullhan siblings that used to sit
+    # here left by switching to their family's published toolchain, which is
+    # the cheaper way out of this list.
     #
     # It is the same trade the SMOKE_BOARDS comment above makes deliberately,
     # and it is one edit to reverse: move a name from here into ALL_BOARDS and
-    # it builds. Note what this does NOT say --- none of these has ever been
-    # built by CI, so "not built" is a statement about cost, not evidence that
-    # they work.
-    "fh8852v210_lite": "internal toolchain: builds gcc+musl from source",
-    "fh8856v100_lite": "internal toolchain: builds gcc+musl from source",
-    "fh8856v200_lite": "internal toolchain: builds gcc+musl from source",
-    "fh8856v210_lite": "internal toolchain: builds gcc+musl from source",
-    "fh8858v200_lite": "internal toolchain: builds gcc+musl from source",
-    "fh8858v210_lite": "internal toolchain: builds gcc+musl from source",
+    # it builds. Note what this does NOT say --- it has never been built by CI,
+    # so "not built" is a statement about cost, not evidence that it works.
     "hi3518ev201_lite": "internal toolchain: builds gcc+musl from source",
 }
 
@@ -172,27 +208,51 @@ UNBUILT_BOARDS = {
 # unknown, and unknown widens. Skipping the matrix for something that does feed
 # the build is the one direction this must never fail in.
 NO_BUILD_WORKFLOWS = {
-    "build-one.yml", "cleanup.yml", "gcc-compat.yml", "image.yml", "lint.yml",
-    "manifest.yml", "qodo-gate.yml", "shell-tests.yml", "toolchain.yml",
-    "uboot.yml",
+    "build-one.yml", "cleanup.yml", "gcc-compat.yml", "image.yml",
+    "issue-labeler.yml", "lint.yml", "manifest.yml", "qodo-gate.yml",
+    "shell-tests.yml", "stale-approvals.yml", "toolchain-asan.yml",
+    "toolchain.yml", "uboot.yml", "vendor-abi.yml",
+    "lumi-ci-checks.yml", "lumi-t33gs.yml",
 }
 
 # Same for .github/scripts/.
+#
+# Every file in .github/scripts/ and .github/workflows/ has to be named in one
+# of these lists or in WIDEN_ON_PURPOSE; --self-test enforces it. Before that,
+# a new off-device test was "unknown" and widened: test_check_mac.sh,
+# test_strip_shell_comments.sh, test_automount.sh, test_excludes_report.sh,
+# toolchain-asan.yml and vendor-abi.yml cost ~6000 runner-minutes of full
+# matrices between them in six weeks, proving nothing about an image.
 NO_BUILD_SCRIPTS = {
-    "build-summary.py", "enrich_manifest.py", "lint-workflow-shell.py",
-    "test_load_hisilicon.sh", "test_shell_parse.sh", "test_sysupgrade.sh",
+    "build-summary.py", "enrich_manifest.py", "lint-issue-forms.py",
+    "test_ca_bundle_lite.sh", "test_network_failover.sh",
+    "lint-workflow-shell.py", "push_build.py", "soc_aliases.py",
+    "test_automount.sh", "test_check_mac.sh", "test_excludes_report.sh",
+    "test_load_hisilicon.sh", "test_load_goke.sh", "test_load_novatek.sh", "test_load_fullhan.sh", "test_load_fullhan_v100.sh", "test_load_hisilicon_layout.sh", "test_push_build.py", "test_shell_parse.sh",
+    "test_strip_shell_comments.sh", "test_sysupgrade.sh", "test_crashlog.sh", "test_failsafe_log.sh", "test_majestic_supervise.sh",
+    "test_vigil_supervise.sh",
+    "test_init_overlay.sh",
+    # build-one.yml's request parser and its test: dispatch and shell-tests
+    # only, never part of a board build.
+    "build_request.sh", "test_build_request.sh",
 }
 
 # CI plumbing: it decides how the build runs but cannot change a byte of what
 # ends up on a camera, so what needs proving is that the steps still work, not
 # that 96 images still come out the same. These get SMOKE_BOARDS.
 #
-# ci-matrix.py is deliberately NOT here. Adding a board is an edit to
-# ALL_BOARDS, and a smoke set would build the 13 boards that were already there
-# and never the new one. It widens like anything else this file has not
-# classified.
+# ci-matrix.py is deliberately NOT here: a smoke set alone would never build a
+# board the edit adds to ALL_BOARDS. classify() gives it the smoke set plus
+# every board the base revision did not build, and the full matrix when the
+# base cannot be read. It edited 26 runs into full matrices in six weeks,
+# ~12000 runner-minutes, most of them for comment or list changes.
 SMOKE_WORKFLOWS = {"build.yml"}
 SMOKE_SCRIPTS = {"check_target_modules.sh"}
+SELECTOR = "ci-matrix.py"
+
+# Files under .github/ that widen to the full matrix by design. Only the
+# selector itself, which classify() narrows further when it can read the base.
+WIDEN_ON_PURPOSE = {SELECTOR}
 
 # One board per way the build can differ: every architecture, every toolchain
 # tuple, every rootfs shape, every variant and every vendor directory appears at
@@ -217,18 +277,36 @@ SMOKE_BOARDS = [
     "nt98566_lite",           # Novatek
     "fh8852v200_lite",        # Fullhan
     "v851s_lite",             # Allwinner
+    "ak3918ev330_lite",       # Anyka, the one 4.4 kernel's EV330 image
     "xm530_lite",             # Xiongmai
+    "s3l_ultimate",           # Ambarella, and squashfs NOR with UBI NAND
 ]
+
+# Boards the nightly builds once a week, on WEEKLY_DAY, rather than every night.
+# They are part of the tree like any other built board, so --self-test holds
+# them to the same contract, but they cost more than they are touched: the v83x
+# pair compile their own gcc and musl before the firmware, and change rarely.
+# The Axera pair are new and not yet run on a camera, so a weekly image is
+# enough until they are (#2670).
+#
+# A pull request builds them only for a change nothing else covers: their own
+# defconfigs, their board directory, or a package no nightly board builds. A
+# change that widens to the full matrix, or reaches them through a package the
+# nightly boards share, leaves them to the next weekly run. A hand dispatch and
+# the ci:full label build them as well.
+#
+# The nightly uploads with --clobber into the rolling releases, so on the other
+# six days their last images stay where flashers and sysupgrade find them. A
+# nightly that skips because HEAD has not moved skips them too; they wait for the
+# next WEEKLY_DAY with a new commit.
+WEEKLY_BOARDS = ["v83x_lite", "v83x_ultimate", "ax620e_lite", "ax620u_lite"]
+WEEKLY_DAY = 6  # datetime.weekday(): Sunday, UTC
 
 # Board directories with no board in ALL_BOARDS. Their defconfigs exist but are
 # not built, so a change there narrows to nothing --- which is correct, and is
 # listed rather than inferred so that a family silently falling out of the
 # matrix fails --self-test instead of quietly skipping CI.
 UNBUILT_FAMILIES = {
-    ("br-ext-chip-allwinner", "v83x"),
-    ("br-ext-chip-ambarella", "s3l"),
-    ("br-ext-chip-anyka", "ak3918ev300"),
-    ("br-ext-chip-fullhan", "fh8833v100"),
     ("br-ext-chip-sigmastar", "infinity3"),
     ("br-ext-chip-ti", "dm36x"),
 }
@@ -250,36 +328,66 @@ UNBUILT_FAMILIES = {
 # package that left the matrix, not one that left the tree.
 #
 # waybeam is unbuildable by construction here rather than merely unselected: it
-# depends on !BR2_PACKAGE_MAJESTIC, and every sigmastar defconfig in ALL_BOARDS
-# sets BR2_PACKAGE_MAJESTIC=y, because both drive the same sensor and encoder.
-# The same exclusion holds downstream, so it is selected nowhere at all: every
-# OpenIPC/builder defconfig that selects wifibroadcast-ng also sets
-# BR2_PACKAGE_MAJESTIC=y, and no defconfig in either tree sets
-# BR2_PACKAGE_WAYBEAM=y. The symbol appears only where it is defined, in
-# general/package/waybeam/Config.in, and in this comment. The line this replaces
-# claimed builder's FPV variants selected it, which sent a contributor debugging
-# an FPV OSD fault (#2395) after a waybeam log file that no shipped image
-# writes. A defconfig with Majestic off, mainline or downstream, would take it
-# off this list.
+# depends on !BR2_PACKAGE_MAJESTIC, and every defconfig in ALL_BOARDS on a
+# family it supports (sigmastar Infinity6E, hi3516cv6xx) sets
+# BR2_PACKAGE_MAJESTIC=y, because both drive the same sensor and encoder. No
+# defconfig in this tree sets BR2_PACKAGE_WAYBEAM=y. Downstream it is selected:
+# OpenIPC/builder's ssc338q_waybeam_generic (builder#185) is wfb-ng with waybeam
+# in place of Majestic, and a hi3516cv6xx waybeam device is to follow the cv610
+# arm (#2860). Those builds are builder's CI, not this matrix. An earlier version
+# of this note claimed builder's FPV variants selected it while no image did,
+# which sent a contributor debugging an FPV OSD fault (#2395) after a waybeam
+# log file that no shipped image wrote -- so check builder before trusting
+# either claim. A mainline defconfig with Majestic off would take it off this
+# list.
 #
 # usb-dual-role is here for the ordinary reason: it needs a device tree that
 # wires dwc3 as dual-role and a kernel built with CONFIG_USB_DWC3_DUAL_ROLE,
 # which no defconfig in ALL_BOARDS has. OpenIPC/builder's gk7205v200_otg_generic
 # selects it. A mainline dual-role defconfig would take it off this list.
+#
+# wpa_supplicant-openipc is here because no board in this tree selects it on
+# purpose. It is the WPA3-SAE supplicant (#2449); the camera that wants it is
+# OpenIPC/builder's ssc377_lite_tp-link-tapo-c120, and the generic ssc377_lite
+# ships no Wi-Fi driver to use it with, so flipping a mainline board to it
+# would spend flash on a radio that is not there. A mainline board with a
+# driver choosing it would take it off this list.
+#
+# anyka-osdrv-ak3918av130 is selected only by ak3918av130_lite, which is in
+# UNBUILT_BOARDS: its prebuilt SDK modules are matched to the kernel by
+# vermagic and a struct-layout probe, not by a boot (see its .mk). It leaves
+# this list when that board joins ALL_BOARDS, which waits for those modules
+# to have run on an AV130 camera.
+#
+# exfat-nofuse-openipc is the exFAT module for the 3.x kernels that
+# exfat-openipc does not build on. Its only user is OpenIPC/builder's
+# msc316dc_lite_imou-looc2 (infinity3, kernel 3.18); the mainline infinity3
+# boards have no card slot driver selected, so it would be flash spent on
+# nothing there.
+#
+# reset-button watches the pin named button= in /usr/share/openipc/gpio.conf,
+# and that file is per-device: OpenIPC/builder ships it under devices/<board>/,
+# and no mainline board has one, so there the init script finds no button and
+# starts nothing. Its first user is a builder device profile for the Heimlink
+# HM202 (SSC325); builder's per-device resetd scripts (t23 Jooan and LSC,
+# Lenovo Snowman) do the same job, each from a copy of its own. A mainline
+# board with a button in a gpio.conf would take it off this list.
 NOT_BUILT = {
-    "adaptive-link", "aic8800-openipc", "allwinner-osdrv-v83x", "atbm-wifi",
-    "aura-httpd", "baresip-openipc", "comgt", "f2fs-tools-openipc", "faceter-agent",
+    "adaptive-link", "aic8800-openipc",
+    "anyka-osdrv-ak3918av130",
+    "aura-httpd", "baresip-openipc", "comgt", "exfat-nofuse-openipc", "f2fs-tools-openipc", "faceter-agent",
     "faceter-detector", "fdk-aac-openipc", "ffmpeg-openipc", "gdbserver-lite",
-    "go2rtc", "herald", "hisi-gpio", "hisilicon-osdrv-hi3536dv100", "i2c-telemetry",
+    "go2rtc", "herald", "hisi-gpio", "i2c-telemetry",
     "jsonfilter", "libhv-openipc", "libre-openipc", "libsrt-openipc",
-    "linux-patcher", "matter",
+    "matter",
     "mavfwd", "mdnsd-openipc", "mini", "mqtt-bot", "msposd", "n3n-openipc", "nabto",
     "netblink", "node-exporter", "ntfy", "onvif-simple-server", "openipc-nfs-root",
-    "osd-openipc", "rtl8188eus-openipc", "rtl8192eu-openipc", "rtl8811cu-openipc",
+    "osd-openipc", "reset-button", "rtl8188eus-openipc", "rtl8192eu-openipc",
+    "rtl8811cu-openipc",
     "rtl8812au", "rtl8812au-openipc", "rtl88x2eu-openipc", "rtw-hostapd", "rubyfpv",
     "siproxd-openipc", "ssv615x-openipc", "ssv635x-openipc", "txw8301-openipc",
     "uqmi-openipc", "usb-dual-role", "vdec-openipc", "venc-openipc",
-    "w1-ds18b20", "waybeam",
+    "w1-ds18b20", "waybeam", "wpa_supplicant-openipc",
     "webface",
     "webrtc-audio-processing-openipc", "wifibroadcast-ng", "wq9001", "yaml-cli-multi",
 }
@@ -315,7 +423,20 @@ WORKFLOW = re.compile(r"^\.github/workflows/([^/]+)$")
 GITHUB_SCRIPT = re.compile(r"^\.github/scripts/([^/]+)$")
 DEFCONFIG = re.compile(r"^br-ext-chip-[^/]+/configs/(.+)_defconfig$")
 BOARD_DIR = re.compile(r"^(br-ext-chip-[^/]+)/board/([^/]+)/")
-PACKAGE_DIR = re.compile(r"^general/package/([^/]+)/")
+# legacy/ nests a second package tree that external.mk and package/Config.in
+# include like the first, and a matrix board can enable one of its packages
+# (ssc337de_ultimate sets BR2_PACKAGE_SIGMASTAR_MOTORS), so a path there is
+# that nested package, not "legacy". A file directly in legacy/ still matches
+# as "legacy" and widens.
+PACKAGE_DIR = re.compile(r"^general/package/(?:legacy/)?([^/]+)/")
+# The package index: general/package/Config.in, which sources every package's
+# Config.in. Adding or removing a package touches it, and nothing else in it
+# changes what a board builds, so a diff that only adds or drops source lines
+# narrows to the boards enabling those packages (see package_index_change).
+PACKAGE_INDEX = "general/package/Config.in"
+INDEX_SOURCE = re.compile(
+    r'^source "\$BR2_EXTERNAL_GENERAL_PATH/package/(?:legacy/)?([^/"]+)/Config\.in"$')
+PACKAGE_GLOBS = ("general/package/*/", "general/package/legacy/*/")
 
 # Label that forces the full matrix on a PR, for when you do not trust the
 # narrowing --- an opensdk bump behaving oddly, say.
@@ -343,9 +464,18 @@ class Tree:
         self.symbols_of = {}      # package dir -> symbols it declares
         self.package_of = {}      # symbol -> package dir
         self.selects = collections.defaultdict(set)   # symbol -> symbols
-        for path in sorted(glob.glob(f"{self.root}/general/package/*/Config.in")):
+        # Packages whose own symbol has a Kconfig default, so a board can build
+        # them without naming them: linux-patcher is `default y if
+        # BR2_LINUX_KERNEL` and hooks the kernel patch step of every board.
+        # The graph below starts from what defconfigs write down and cannot
+        # see these, so classify() widens on them rather than narrowing to
+        # whichever boards happen to spell the symbol out.
+        self.implicit = set()
+        for path in sorted(p for pattern in PACKAGE_GLOBS
+                           for p in glob.glob(f"{self.root}/{pattern}Config.in")):
             package = path.split(os.sep)[-2]
             current, owned = None, []
+            main = "BR2_PACKAGE_" + re.sub(r"[^A-Z0-9]", "_", package.upper())
             with open(path) as handle:
                 for line in handle:
                     declared = re.match(r"\s*(?:menu)?config\s+(BR2_\w+)", line)
@@ -354,6 +484,11 @@ class Tree:
                         owned.append(current)
                         self.package_of[current] = package
                         continue
+                    if re.match(r"\s*(?:---)?help", line):
+                        current = None   # help text is prose, not attributes
+                        continue
+                    if current == main and re.match(r"\s*default\s+(?!n\b)", line):
+                        self.implicit.add(package)
                     selected = re.match(r"\s*select\s+(BR2_\w+)", line)
                     if selected and current:
                         self.selects[current].add(selected.group(1))
@@ -367,7 +502,8 @@ class Tree:
         # conditional is opaque to this parser, so the edge is taken
         # unconditionally --- over-approximating widens, which is the safe way.
         self.depends = collections.defaultdict(list)   # package -> [(guard|None, package)]
-        for path in sorted(glob.glob(f"{self.root}/general/package/*/*.mk")):
+        for path in sorted(p for pattern in PACKAGE_GLOBS
+                           for p in glob.glob(f"{self.root}/{pattern}*.mk")):
             package = path.split(os.sep)[-2]
             with open(path) as handle:
                 body = re.sub(r"\\\n", " ", handle.read())
@@ -462,13 +598,21 @@ class Tree:
         return packages
 
     def _resolve(self):
-        self.built = [b for b in ALL_BOARDS if b in self.boards]
+        self.nightly = [b for b in ALL_BOARDS if b in self.boards]
+        self.weekly = [b for b in WEEKLY_BOARDS if b in self.boards]
+        self.built = self.nightly + self.weekly
         self.smoke = [b for b in self.built if b in set(SMOKE_BOARDS)]
         for board in self.built:
             self.boards[board]["packages"] = self._closure(self.boards[board]["symbols"])
 
     def boards_for_package(self, package):
         return [b for b in self.built if package in self.boards[b]["packages"]]
+
+    def pull_request_boards_for_package(self, package):
+        """boards_for_package, less the weekly boards when a nightly board
+        builds the package too: then the change is not theirs alone."""
+        hits = self.boards_for_package(package)
+        return [b for b in hits if b in self.nightly] or hits
 
     def boards_for_family(self, vendor_dir, family):
         return [b for b in self.built
@@ -480,20 +624,45 @@ class Tree:
 # Classification
 # --------------------------------------------------------------------------
 
-def classify(tree, changed, labels=(), event="pull_request", draft=False):
-    """Map a list of changed paths to {rows, needs_build, reason}."""
-    full = list(tree.built)
+def classify(tree, changed, labels=(), event="pull_request", draft=False,
+             base_boards=None, index_packages=None, nightly=False, weekday=None):
+    """Map a list of changed paths to {rows, needs_build, reason}.
 
+    base_boards is ALL_BOARDS as the PR's base revision had it, or None when it
+    could not be read; only an edit to this file consults it.
+
+    index_packages is the set of packages whose source lines are the whole of
+    the PR's change to PACKAGE_INDEX, or None when the change is anything more
+    (or its diff could not be read); only an edit to PACKAGE_INDEX consults it.
+
+    nightly is the dispatch's `nightly` input and weekday the UTC weekday of the
+    run; together they decide whether WEEKLY_BOARDS are in a nightly.
+    """
     if event != "pull_request":
-        return _decision(full, True, reason=f"{event} builds everything")
+        if not nightly:
+            return _decision(list(tree.built), True, reason=f"{event} builds everything")
+        if weekday == WEEKLY_DAY:
+            return _decision(list(tree.built), True,
+                             reason="nightly builds everything, weekly boards included")
+        return _decision(list(tree.nightly), True,
+                         reason="nightly builds everything but the weekly boards")
     if FULL_LABEL in labels:
-        return _decision(full, True, reason=f"{FULL_LABEL} label set")
+        return _decision(list(tree.built), True, reason=f"{FULL_LABEL} label set")
+
+    # On a pull request the full matrix is the nightly one: a change that
+    # widens leaves the weekly boards to their weekly run. A weekly board this
+    # pull request adds to the matrix is the exception: nothing has built it
+    # yet, so it is built here rather than first on a Sunday.
+    full = list(tree.nightly)
+    if base_boards is not None and f".github/scripts/{SELECTOR}" in changed:
+        full += [b for b in tree.weekly if b not in base_boards]
+
     if draft:
         return _decision([], False, reason="draft pull request")
     if not changed:
         return _decision(full, True, reason="no file list available")
 
-    boards, smoked = set(), False
+    boards, smoked = set(), None
     for path in changed:
         if DOCS.match(path) or MARKDOWN.match(path) or REVIEW_CONFIG.match(path) \
                 or REPO_META.match(path):
@@ -506,16 +675,24 @@ def classify(tree, changed, labels=(), event="pull_request", draft=False):
                 continue
             if workflow.group(1) in SMOKE_WORKFLOWS:
                 boards.update(tree.smoke)
-                smoked = True
+                smoked = smoked or "CI plumbing"
                 continue
             return _decision(full, True, reason=f"{path} affects every board")
         script = GITHUB_SCRIPT.match(path)
         if script:
             if script.group(1) in NO_BUILD_SCRIPTS:
                 continue
+            if script.group(1) == SELECTOR and base_boards is not None:
+                # This file picks boards and changes no image. What an edit to
+                # it can break is the build steps (smoke) and a board it newly
+                # adds to the matrix, which nothing has ever built.
+                boards.update(tree.smoke)
+                boards.update(b for b in tree.built if b not in base_boards)
+                smoked = smoked or "CI plumbing"
+                continue
             if script.group(1) in SMOKE_SCRIPTS:
                 boards.update(tree.smoke)
-                smoked = True
+                smoked = smoked or "CI plumbing"
                 continue
             return _decision(full, True, reason=f"{path} affects every board")
 
@@ -537,20 +714,44 @@ def classify(tree, changed, labels=(), event="pull_request", draft=False):
                 continue
             return _decision(full, True, reason=f"{path} is an unknown SoC family")
 
+        if path == PACKAGE_INDEX and index_packages is not None:
+            # Only source lines came or went. kconfig parses the index the same
+            # way for every board, so the smoke set proves the parse; the boards
+            # enabling a package that came or went prove the build. A package
+            # boards enable by default reaches every board.
+            if any(package in tree.implicit for package in index_packages):
+                return _decision(full, True,
+                                 reason=f"{path} sources a package boards enable by default")
+            for package in index_packages:
+                boards.update(tree.pull_request_boards_for_package(package))
+            boards.update(tree.smoke)
+            smoked = smoked or f"{path} source lines"
+            continue
+
         package_dir = PACKAGE_DIR.match(path)
         if package_dir:
-            hits = tree.boards_for_package(package_dir.group(1))
+            if package_dir.group(1) in tree.implicit:
+                return _decision(full, True,
+                                 reason=f"{path} is a package boards enable by default")
+            hits = tree.pull_request_boards_for_package(package_dir.group(1))
             if hits:
                 boards.update(hits)
                 continue
-            # No board in the matrix enables this package -- but it still
-            # widens, and NOT_BUILT deliberately does not shortcut that.
+            # No board in the matrix enables this package -- but it cannot
+            # narrow to zero, and NOT_BUILT deliberately does not shortcut that.
             # general/external.mk does
             #     include $(sort $(wildcard $(BR2_EXTERNAL)/package/*/*.mk))
             # and general/package/Config.in sources every Config.in, both
             # unconditionally, so a syntax error in a package nothing enables
-            # still breaks make or kconfig for all 96 boards. Narrowing to zero
-            # here would let that reach master unbuilt.
+            # still breaks make or kconfig for every board. That failure is the
+            # same on every board, though -- the parse does not depend on the
+            # defconfig -- so the smoke set proves it as well as 100 boards do.
+            # The global patch dirs, busybox and gcc are not like this: they
+            # change what every board compiles, so they still widen.
+            if package_dir.group(1) not in PACKAGE_NON_PACKAGES:
+                boards.update(tree.smoke)
+                smoked = smoked or "a package no matrix board builds"
+                continue
             return _decision(full, True, reason=f"{path} reaches no board of its own")
 
         # The overlay, the Makefile, general/scripts, general/linux, the
@@ -567,9 +768,9 @@ def classify(tree, changed, labels=(), event="pull_request", draft=False):
     # affected boards" would misrepresent that.
     if boards == set(tree.smoke):
         return _decision(sorted(boards), True,
-                         reason="CI plumbing only: smoke set, not every board")
+                         reason=f"smoke set, not every board: {smoked} only")
     return _decision(sorted(boards), True,
-                     reason="affected boards plus the CI-plumbing smoke set")
+                     reason=f"affected boards plus the smoke set for {smoked}")
 
 
 def _decision(rows, needs_build, reason):
@@ -583,6 +784,27 @@ def _decision(rows, needs_build, reason):
     }
 
 
+def package_index_change(patch):
+    """The packages a diff of PACKAGE_INDEX adds or drops, or None.
+
+    None unless every added and removed line is a package source line: any
+    other edit to the index (a menu, an if, a comment) widens as before.
+    """
+    if not patch:
+        return None
+    packages = set()
+    for line in patch.splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if not line.startswith(("+", "-")):
+            continue
+        source = INDEX_SOURCE.match(line[1:].strip())
+        if not source:
+            return None
+        packages.add(source.group(1))
+    return packages or None
+
+
 # --------------------------------------------------------------------------
 # GitHub plumbing
 # --------------------------------------------------------------------------
@@ -591,16 +813,17 @@ def changed_files_from_api():
     """Ask the API which files the PR touches.
 
     Cheaper and more robust than a diff: computing a merge base needs history
-    the build jobs otherwise only ever clone shallowly.
+    the build jobs otherwise only ever clone shallowly. Returns the paths and
+    the patch of PACKAGE_INDEX (None if untouched or not given), or None, None.
     """
     repo = os.environ.get("GITHUB_REPOSITORY")
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     event = _event()
     number = event.get("pull_request", {}).get("number")
     if not (repo and token and number):
-        return None
+        return None, None
 
-    files, page = [], 1
+    files, index_patch, page = [], None, 1
     while True:
         url = (f"https://api.github.com/repos/{repo}/pulls/{number}/files"
                f"?per_page=100&page={page}")
@@ -611,12 +834,16 @@ def changed_files_from_api():
         with urllib.request.urlopen(request, timeout=30) as response:
             batch = json.load(response)
         files += [entry["filename"] for entry in batch]
+        # The API omits "patch" for a diff it considers too large; then
+        # index_patch stays None and an edit to the index widens.
+        index_patch = next((entry.get("patch") for entry in batch
+                            if entry["filename"] == PACKAGE_INDEX), index_patch)
         # A rename drops the old path from the list; it may be the only thing
         # tying the change to a SoC, so count it too.
         files += [entry["previous_filename"] for entry in batch
                   if entry.get("previous_filename")]
         if len(batch) < 100:
-            return files
+            return files, index_patch
         page += 1
         # The endpoint stops at 3000 files. Returning what we have would be a
         # partial list, and a partial list can only ever narrow the matrix too
@@ -624,7 +851,46 @@ def changed_files_from_api():
         # everything".
         if page > 30:
             print("ci-matrix: PR exceeds the 3000-file listing limit", file=sys.stderr)
-            return None
+            return None, None
+
+
+def all_boards_of(source):
+    """ALL_BOARDS and WEEKLY_BOARDS as written in a copy of this file, or None.
+
+    Read with ast, never executed: on a pull request the copy comes from the
+    base branch, but the parser is the only part of it that has to run. A copy
+    from before WEEKLY_BOARDS existed gives ALL_BOARDS alone.
+    """
+    found = {}
+    try:
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and \
+                            target.id in ("ALL_BOARDS", "WEEKLY_BOARDS"):
+                        found[target.id] = set(ast.literal_eval(node.value))
+    except (SyntaxError, ValueError):
+        return None
+    if "ALL_BOARDS" not in found:
+        return None
+    return found["ALL_BOARDS"] | found.get("WEEKLY_BOARDS", set())
+
+
+def base_all_boards():
+    """ALL_BOARDS at the PR's base revision, or None -- which widens."""
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    sha = _event().get("pull_request", {}).get("base", {}).get("sha")
+    if not (repo and token and sha):
+        return None
+    url = (f"https://api.github.com/repos/{repo}/contents/.github/scripts/"
+           f"{SELECTOR}?ref={sha}")
+    request = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.raw",
+    })
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return all_boards_of(response.read().decode())
 
 
 def _event():
@@ -702,13 +968,17 @@ def self_test():
                 f"general/package/{package}/ has no Config.in symbol; add it to "
                 f"PACKAGE_NON_PACKAGES if it is not a Buildroot package")
             continue
-        if tree.boards_for_package(package):
+        if tree.boards_for_package(package) or package in tree.implicit:
             continue
         if package not in NOT_BUILT:
             problems.append(
                 f"general/package/{package}/ is built by no board in ALL_BOARDS; add "
                 f"it to NOT_BUILT if that is deliberate")
     for package in sorted(NOT_BUILT):
+        if package in tree.implicit:
+            problems.append(
+                f"{package} is in NOT_BUILT but its symbol defaults on; boards "
+                f"build it without naming it, so drop it")
         if tree.boards_for_package(package):
             problems.append(
                 f"{package} is in NOT_BUILT but the matrix builds it now; drop it")
@@ -737,11 +1007,25 @@ def self_test():
             if not os.path.exists(os.path.join(REPO_ROOT, ".github", directory, name)):
                 problems.append(
                     f".github/{directory}/{name} is classified but does not exist")
+    # Every file under .github/scripts and .github/workflows is classified.
+    # An unlisted one widens, which is safe but costs a full matrix on every
+    # push of every PR that touches it -- so make the PR that adds it decide.
+    for names, directory in [(NO_BUILD_WORKFLOWS | SMOKE_WORKFLOWS, "workflows"),
+                             (NO_BUILD_SCRIPTS | SMOKE_SCRIPTS | WIDEN_ON_PURPOSE,
+                              "scripts")]:
+        for name in sorted(os.listdir(os.path.join(REPO_ROOT, ".github", directory))):
+            if os.path.isfile(os.path.join(REPO_ROOT, ".github", directory, name)) \
+                    and name not in names:
+                problems.append(
+                    f".github/{directory}/{name} is not classified; add it to the "
+                    f"no-build or smoke list, or it widens every PR to the full matrix")
     if len(tree.smoke) >= len(tree.built):
         problems.append("SMOKE_BOARDS is not smaller than the full matrix")
     covered = set().union(*(tree.boards[b]["traits"] for b in tree.smoke)) \
         if tree.smoke else set()
-    for trait in sorted(set().union(*(tree.boards[b]["traits"] for b in tree.built))):
+    # The weekly boards are left out: a CI-plumbing change does not build them,
+    # so their traits are proven by the weekly run, not by the smoke set.
+    for trait in sorted(set().union(*(tree.boards[b]["traits"] for b in tree.nightly))):
         if trait not in covered:
             problems.append(
                 f"no board in SMOKE_BOARDS has {trait}; a CI-plumbing change "
@@ -750,26 +1034,27 @@ def self_test():
     # 5. The narrowing must be sound: what is not recognised as one SoC's own
     #    has to come back with the full matrix, and what is has to come back
     #    with exactly the boards that build it.
-    full = len(tree.built)
+    full = len(tree.nightly)
     smoke = len(tree.smoke)
     cases = [
         # Vendor packages narrow to the families that enable them.
         (["general/package/hisilicon-osdrv-hi3516ev200/files/script/load_hisilicon"],
          8, "osdrv narrows to its family"),
         (["general/package/hisilicon-opensdk/hisilicon-opensdk.mk"],
-         43, "opensdk spans HiSilicon and Goke"),
+         49, "opensdk spans HiSilicon and Goke"),
         (["general/package/goke-osdrv-gk7205v200/Config.in"], 7, "goke osdrv"),
         (["general/package/hisilicon-osdrv-hi3520dv200/files/script/load_hisilicon"],
          1, "single-board osdrv"),
         # The two edge kinds the closure depends on. uclibc-compat is reached
-        # only through a .mk _DEPENDENCIES line and sigmastar-osdrv-sensors only
-        # through a Config.in select; either one missing zeroes them out.
+        # through a .mk _DEPENDENCIES line from the three hi3516cv100 boards
+        # (gk7206v100 selects it too, the fourth), and sigmastar-osdrv-sensors
+        # only through a Config.in select; either kind missing drops the count.
         (["general/package/uclibc-compat/src/uclibc-compat-static.c"],
-         3, "reached via .mk _DEPENDENCIES"),
+         4, "reached via .mk _DEPENDENCIES"),
         (["general/package/sigmastar-osdrv-sensors/Config.in"],
          24, "reached via Config.in select"),
         # Shared packages narrow too, just barely.
-        (["general/package/majestic/majestic.mk"], 86, "majestic excludes Lumi T23"),
+        (["general/package/majestic/majestic.mk"], 105, "majestic excludes Lumi T23"),
         # Board configs and kernel configs.
         (["br-ext-chip-goke/configs/gk7205v200_lite_defconfig"], 1, "one defconfig"),
         (["br-ext-chip-hisilicon/board/hi3516ev200/hi3516ev300.generic.config"],
@@ -777,6 +1062,16 @@ def self_test():
         (["general/package/hisilicon-osdrv-hi3516cv200/files/script/load_hisilicon",
           "br-ext-chip-hisilicon/configs/hi3516cv200_lite_defconfig"],
          3, "union of two narrowing paths"),
+        # The weekly boards build on a PR only for what is theirs alone.
+        (["br-ext-chip-allwinner/configs/v83x_lite_defconfig"], 1,
+         "a weekly board's defconfig"),
+        (["br-ext-chip-allwinner/board/v83x/v83x.generic.config"], 2,
+         "the weekly family's kernel config"),
+        (["general/package/allwinner-osdrv-v83x/allwinner-osdrv-v83x.mk"], 2,
+         "a package only the weekly boards build"),
+        (["br-ext-chip-allwinner/configs/v83x_lite_defconfig",
+          "general/package/hisilicon-osdrv-hi3520dv200/files/script/load_hisilicon"],
+         2, "a weekly defconfig beside a nightly board's package"),
         # Everything shared, global, or unknown widens.
         (["Makefile"], full, "build system"),
         (["general/openipc.fragment"], full, "fragment appended to every defconfig"),
@@ -788,12 +1083,23 @@ def self_test():
         (["general/package/busybox/busybox.config"], full, "every defconfig points at it"),
         # external.mk includes every package's .mk and Config.in sources every
         # Config.in, so a package nothing enables can still break every board.
+        # ...but the parse is the same on every board, so the smoke set proves it.
         (["general/package/rtl8188eus-openipc/rtl8188eus-openipc.mk"],
-         full, "a package no board enables still widens"),
-        (["general/package/legacy/datalink/files/tweaksys"], full, "the nested legacy tree"),
+         smoke, "a package no board enables is proven by the smoke set"),
+        (["general/package/legacy/datalink/files/tweaksys"],
+         smoke, "a nested legacy package no board enables"),
+        (["general/package/legacy/sigmastar-motors/Config.in"],
+         1, "a nested legacy package narrows to the board enabling it"),
+        (["general/package/legacy/Config.in"], full, "a file directly in legacy/"),
+        # A package whose symbol defaults on is built by boards that never
+        # name it, which the graph cannot see: it must not fall to the smoke set.
+        (["general/package/linux-patcher/linux-patcher.mk"],
+         full, "a package enabled by a Kconfig default widens"),
+        (["general/package/all-patches/busybox/0001-x.patch"],
+         full, "the global patch dir is no package, and widens"),
         (["br-ext-chip-hisilicon/external.mk"], full, "vendor external tree"),
         ([".github/scripts/ci-matrix.py"], full,
-         "this file picks the boards, so it cannot pick fewer for itself"),
+         "this file, with no base revision to compare against, widens"),
         ([".github/workflows/some-new-thing.yml"], full, "an unknown workflow widens"),
         ([".github/scripts/some-new-thing.sh"], full, "an unknown script widens"),
         # CI plumbing gets the smoke set: it cannot change image content, only
@@ -820,7 +1126,24 @@ def self_test():
         (["best_practices.md"], 0, "review standards are markdown"),
         (["CLAUDE.md"], 0, "agent instructions are markdown"),
         ([".github/workflows/qodo-gate.yml"], 0, "review gate never builds"),
+        ([".github/workflows/issue-labeler.yml"], 0, "the issue labeller never builds"),
+        ([".github/workflows/stale-approvals.yml"], 0, "the run pruner never builds"),
+        ([".github/scripts/lint-issue-forms.py"], 0, "the issue-form linter never builds"),
+        ([".github/ISSUE_TEMPLATE/config.yml"], 0, "issue templates never build"),
+        ([".github/ISSUE_TEMPLATE/1-bug.yml"], 0, "an issue form never builds"),
         ([".github/scripts/test_sysupgrade.sh"], 0, "shell-tests fixture"),
+        ([".github/scripts/test_check_mac.sh"], 0, "shell-tests: MAC derivation"),
+        ([".github/scripts/test_crashlog.sh"], 0, "shell-tests: crash log capture"),
+        ([".github/scripts/test_failsafe_log.sh"], 0, "shell-tests: failed-boot log"),
+        ([".github/scripts/test_majestic_supervise.sh"], 0, "shell-tests: majestic supervisor"),
+        ([".github/scripts/test_strip_shell_comments.sh"], 0, "shell-tests: stripper"),
+        ([".github/scripts/test_automount.sh"], 0, "shell-tests: automount"),
+        ([".github/scripts/test_excludes_report.sh"], 0, "shell-tests: excludes"),
+        ([".github/scripts/test_ca_bundle_lite.sh"], 0, "shell-tests: lite CA bundle"),
+        ([".github/scripts/test_network_failover.sh"], 0, "shell-tests: network failover"),
+        ([".github/scripts/test_init_overlay.sh"], 0, "shell-tests: init overlay"),
+        ([".github/workflows/toolchain-asan.yml"], 0, "ASan toolchain is dispatch-only"),
+        ([".github/workflows/vendor-abi.yml"], 0, "the advisory ABI audit"),
         ([".github/workflows/lint.yml"], 0, "the workflow linter never builds"),
         ([".github/scripts/lint-workflow-shell.py"], 0, "its script"),
         ([".github/PULL_REQUEST_TEMPLATE.md"], 0, "PR template"),
@@ -835,7 +1158,7 @@ def self_test():
         (["LICENSES/vendor.txt"], full, "LICENSES/ is not the licence file"),
         (["READMEgenerator.c"], full, "README prefix is not a readme"),
         (["general/package/majestic/README.md"],
-         86, "markdown inside a package is that package"),
+         105, "markdown inside a package is that package"),
         (["br-ext-chip-hisilicon/board/hi3516ev200/NOTES.md"],
          8, "markdown inside a board dir is that family"),
         (["general/scripts/pr_compliance_checklist.yaml"],
@@ -850,6 +1173,65 @@ def self_test():
         if got != expected:
             problems.append(f"{what}: expected {expected} rows, got {got}")
 
+    # 5b. An edit to this file builds the smoke set, plus whatever it adds to
+    #     the matrix, when the base revision's ALL_BOARDS is known.
+    selector = [".github/scripts/ci-matrix.py"]
+    newest = tree.built[-1]
+    for base, expected, what in [
+            (set(tree.built), set(tree.smoke), "selector edit adding no board"),
+            (set(tree.built) - {newest}, set(tree.smoke) | {newest},
+             "selector edit adding a board builds it too")]:
+        got = set(classify(tree, selector, base_boards=base)["rows"])
+        if got != expected:
+            problems.append(f"{what}: expected {sorted(expected)}, got {sorted(got)}")
+    if len(classify(tree, selector + ["general/overlay/etc/passwd"],
+                    base_boards=set(tree.built))["rows"]) != full:
+        problems.append("selector edit plus an overlay file must still widen")
+    added = set(tree.built) - {WEEKLY_BOARDS[0]}
+    if set(classify(tree, selector + ["general/overlay/etc/passwd"],
+                    base_boards=added)["rows"]) != set(tree.nightly) | {WEEKLY_BOARDS[0]}:
+        problems.append("a widening PR that adds a weekly board must build it too")
+    # 5c. A change to the package index made only of source lines builds the
+    #     boards enabling those packages plus the smoke set; anything else in
+    #     it, or a diff we could not read, widens.
+    index = [PACKAGE_INDEX]
+    line = 'source "$BR2_EXTERNAL_GENERAL_PATH/package/{}/Config.in"'
+    package = next(p for p in sorted(tree.symbols_of)
+                   if p not in tree.implicit and tree.pull_request_boards_for_package(p)
+                   and set(tree.pull_request_boards_for_package(p)) - set(tree.smoke))
+    expected = set(tree.smoke) | set(tree.pull_request_boards_for_package(package))
+    got = set(classify(tree, index, index_packages={package})["rows"])
+    if got != expected:
+        problems.append(f"index source line for {package}: expected "
+                        f"{sorted(expected)}, got {sorted(got)}")
+    if len(classify(tree, index)["rows"]) != full:
+        problems.append("an index edit with no readable diff must widen")
+    if tree.implicit and len(classify(
+            tree, index, index_packages={sorted(tree.implicit)[0]})["rows"]) != full:
+        problems.append("an index source line for a default-on package must widen")
+    if len(classify(tree, index + ["general/overlay/etc/passwd"],
+                    index_packages={package})["rows"]) != full:
+        problems.append("an index source line plus an overlay file must still widen")
+    for patch, want, what in [
+            (f"@@ -1,2 +1,3 @@\n {line.format('a')}\n+{line.format(package)}\n",
+             {package}, "an added source line"),
+            (f"@@ -1,3 +1,2 @@\n-{line.format(package)}\n {line.format('a')}\n",
+             {package}, "a removed source line"),
+            (f"@@ -1,2 +1,3 @@\n+menu \"x\"\n+{line.format(package)}\n",
+             None, "a source line with a menu"),
+            ("", None, "an empty diff")]:
+        if package_index_change(patch) != want:
+            problems.append(f"package_index_change on {what}: expected {want}")
+
+    source = open(os.path.abspath(__file__)).read()
+    if all_boards_of(source) != set(ALL_BOARDS) | set(WEEKLY_BOARDS):
+        problems.append("all_boards_of() cannot read ALL_BOARDS and WEEKLY_BOARDS "
+                        "back out of this file")
+    if all_boards_of('ALL_BOARDS = ["a"]') != {"a"}:
+        problems.append("all_boards_of() must read a base from before WEEKLY_BOARDS")
+    if all_boards_of("ALL_BOARDS = [") is not None:
+        problems.append("all_boards_of() must give None, not raise, on a broken file")
+
     # 6. Zero rows and "go build something" must never be emitted together, in
     #    either direction: Actions errors on an empty include list, and a row
     #    list nobody builds is a matrix that silently proves nothing.
@@ -863,9 +1245,25 @@ def self_test():
     # 7. Non-PR events and the escape hatch always get everything.
     for kwargs, what in [({"event": "schedule"}, "schedule"),
                          ({"event": "workflow_dispatch"}, "dispatch"),
-                         ({"labels": [FULL_LABEL]}, FULL_LABEL)]:
-        if len(classify(tree, ["README.md"], **kwargs)["rows"]) != full:
+                         ({"labels": [FULL_LABEL]}, FULL_LABEL),
+                         ({"event": "workflow_dispatch", "nightly": True,
+                           "weekday": WEEKLY_DAY}, "the nightly on WEEKLY_DAY")]:
+        if set(classify(tree, ["README.md"], **kwargs)["rows"]) != set(tree.built):
             problems.append(f"{what} must build everything")
+    # 7b. Any other day's nightly builds every board but the weekly ones.
+    for day in range(7):
+        if day == WEEKLY_DAY:
+            continue
+        got = set(classify(tree, ["README.md"], event="workflow_dispatch",
+                           nightly=True, weekday=day)["rows"])
+        if got != set(tree.nightly):
+            problems.append(f"the nightly on weekday {day} must build all but the "
+                            f"weekly boards, got {len(got)} boards")
+    for board in WEEKLY_BOARDS:
+        if board not in tree.boards:
+            problems.append(f"{board} is in WEEKLY_BOARDS but has no defconfig")
+        if board in ALL_BOARDS:
+            problems.append(f"{board} is in both ALL_BOARDS and WEEKLY_BOARDS")
     if classify(tree, ["general/package/majestic/majestic.mk"], draft=True)["needs_build"]:
         problems.append("a draft pull request must not build")
 
@@ -906,6 +1304,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stdin", action="store_true",
                         help="read changed paths from stdin instead of the API")
+    parser.add_argument("--base-file", metavar="PATH",
+                        help="with --stdin: the base revision's ci-matrix.py, so an "
+                             "edit to it narrows as it would on a pull request")
+    parser.add_argument("--index-diff", metavar="PATH",
+                        help="with --stdin: a diff of general/package/Config.in, "
+                             "so a change of only source lines narrows as it "
+                             "would on a pull request")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -916,20 +1321,39 @@ def main():
     if args.stdin:
         changed = [line.strip() for line in sys.stdin if line.strip()]
         event, labels, draft = "pull_request", [], False
+        nightly, weekday = False, None
+        base_boards, index_patch = None, None
+        if args.base_file:
+            with open(args.base_file) as handle:
+                base_boards = all_boards_of(handle.read())
+        if args.index_diff:
+            with open(args.index_diff) as handle:
+                index_patch = handle.read()
     else:
         event = os.environ.get("GITHUB_EVENT_NAME", "pull_request")
         pull_request = _event().get("pull_request", {})
         labels = [label["name"] for label in pull_request.get("labels", [])]
         draft = bool(pull_request.get("draft"))
-        changed = None
+        changed, base_boards, index_patch = None, None, None
+        # A dispatch's inputs reach the event payload as strings.
+        nightly = str((_event().get("inputs") or {}).get("nightly", "")).lower() == "true"
+        weekday = datetime.datetime.now(datetime.timezone.utc).weekday()
         if event == "pull_request":
             try:
-                changed = changed_files_from_api()
+                changed, index_patch = changed_files_from_api()
             except (urllib.error.URLError, OSError, ValueError) as exc:
                 # Never fail the run over this; an empty list means full matrix.
                 print(f"ci-matrix: cannot list PR files ({exc})", file=sys.stderr)
+            if changed and f".github/scripts/{SELECTOR}" in changed:
+                try:
+                    base_boards = base_all_boards()
+                except (urllib.error.URLError, OSError, ValueError) as exc:
+                    # None: an edit to this file then widens, as it always did.
+                    print(f"ci-matrix: cannot read the base {SELECTOR} ({exc})",
+                          file=sys.stderr)
 
-    decision = classify(tree, changed or [], labels, event, draft)
+    decision = classify(tree, changed or [], labels, event, draft, base_boards,
+                        package_index_change(index_patch), nightly, weekday)
 
     print(f"ci-matrix: {len(decision['rows'])}/{len(tree.built)} boards "
           f"(needs_build={decision['needs_build']}) --- {decision['reason']}",

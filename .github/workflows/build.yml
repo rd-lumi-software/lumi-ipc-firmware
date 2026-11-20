@@ -267,6 +267,12 @@ jobs:
       needs.preflight.outputs.should_build == 'true' &&
       needs.select.outputs.needs-build == 'true'
     runs-on: ubuntu-latest
+    # A cold ultimate build takes about 15 minutes, and the full download-flake
+    # budget below adds 38.5 minutes of backoff to that. Without a cap, a
+    # build that stops making progress holds its runner for GitHub's six-hour
+    # default: t31_ultimate went silent mid-configure on 2026-10-25
+    # (run 40175177369) and was still holding one an hour later.
+    timeout-minutes: 120
     env:
       BUILD_ID:  ${{ needs.preflight.outputs.build_id }}
       BUILD_SHA: ${{ needs.preflight.outputs.head_sha }}
@@ -447,6 +453,16 @@ jobs:
             fi
 
             cause=$(classify_failure "${buildlog}")
+            # The phase is the class (classify_failure above): only fetching
+            # and unpacking fail on a flake. A package that broke while it
+            # was patched, configured, built or installed is code, and will
+            # break the same way on every attempt. ssc333/ssc335_ultimate
+            # spent 55 minutes each on 2026-10-25 (run 40175177369) retrying
+            # one make error six times. Ending the loop here keeps the
+            # summariser's "build failed after N attempts" line.
+            case "$cause" in
+              */patched|*/configured|*/built|*/*_installed|*/installed) sleep_for="" ;;
+            esac
             if [ -z "$sleep_for" ]; then
               echo "::error::${{matrix.platform}}: build failed after ${attempt} attempts — ${cause}"
               exit 1
@@ -476,8 +492,14 @@ jobs:
           TIME=$(date -d @${SECONDS} +%M:%S)
           echo TIME=${TIME} >> ${GITHUB_ENV}
 
-          NORFW=$(find output/images -name openipc*nor*)
-          if [ -e ${NORFW} ]; then
+          # The plain NOR package. gk7205v200-family boards build a -split
+          # one beside it (Makefile REPACK_NOR_SPLIT), and two paths here made
+          # the test below fail and the upload step skip.
+          # A board that publishes only the split package (hi3516cv6xx,
+          # hi3519dv500) has no plain one: then that is its NOR package.
+          NORFW=$(find output/images -name 'openipc*nor*' ! -name '*-split.tgz' | head -1)
+          [ -n "${NORFW}" ] || NORFW=$(find output/images -name 'openipc*nor*-split.tgz' | head -1)
+          if [ -n "${NORFW}" ] && [ -e "${NORFW}" ]; then
             echo NORFW=${NORFW} >> ${GITHUB_ENV}
           fi
 
@@ -514,25 +536,85 @@ jobs:
           if [ -e "$KCONFIG" ]; then echo "KCONFIG=$KCONFIG" >> ${GITHUB_ENV}; fi
           if [ -e "$KHELP" ]; then echo "KHELP=$KHELP" >> ${GITHUB_ENV}; fi
 
-      # Hand the firmware + sidecars to the single `publish` job instead of
-      # uploading to releases from here. ~90 matrix jobs all deleting and
+      # The size report and kconfig graph, for the `report` job that pushes
+      # them to openipc.org. An artifact of their own, a few tens of KB, kept a
+      # week -- unlike the images below, which are kept a day because publish
+      # consumes them within the run -- so a report that could not be pushed
+      # can be re-run days later. Both reports are optional, so is this.
+      - name: Upload reports
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: reports-${{ matrix.platform }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            output/images/sizes.*.json
+            output/images/kconfig-graph.*.json
+            output/images/kconfig-help.*.json
+
+      # Hand the firmware to the single `publish` job instead of uploading to
+      # releases from here. ~90 matrix jobs all deleting and
       # re-uploading assets on the SAME shared `nightly`/`latest` releases at
       # once made the GitHub releases API return HTTP 500 ("Server Error") —
       # e.g. run 27108181857, where every build succeeded but 14 jobs went red
       # in their upload step. Consolidating every release write into one job
       # removes the concurrent-writer contention.
+      #
+      # It also makes this the only post-build step whose failure costs
+      # anything, because it is the only one something downstream reads.
+      # `size-report`, `kconfig-graph` and the Telegram call below all degrade
+      # to a warning; this upload IS the board's handoff to `publish`, so a
+      # board whose artifact never arrives keeps its PREVIOUS image on
+      # `nightly` and `latest` (#2303) while every other board moves on. It
+      # therefore has to keep failing the job — but it had no reason to fail
+      # it for one dropped packet, which is what the retry below fixes.
+      #
+      # On 2026-09-22 (run 35761639634) gk7205v200_ultimate built clean —
+      # 1876KB/2048KB kernel, 6656KB/8192KB rootfs, modules verified — and
+      # then died here with `getaddrinfo EAI_AGAIN` against
+      # productionresultssa2.blob.core.windows.net: a runner DNS blip talking
+      # to Azure blob storage. One board shipped a day-old image and the
+      # nightly went red 99/100. The build step gets 7 attempts over ~38
+      # minutes (#2036); this one got a single shot, the same asymmetry that
+      # made a lost Telegram packet fail a run before #2351.
       - name: Upload build artifacts
+        id: upload
         if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: fw-${{ matrix.platform }}
+          if-no-files-found: ignore
+          retention-days: 1
+          path: output/images/openipc*.tgz
+
+      # A pause, not an immediate retry: EAI_AGAIN is a resolver that has not
+      # answered yet, and asking it again in the same second asks the same
+      # unanswered question.
+      - name: Pause before retrying the upload
+        if: github.event_name != 'pull_request' && steps.upload.outcome == 'failure'
+        run: |
+          echo "::warning::${{matrix.platform}}: artifact upload failed, retrying in 60s"
+          sleep 60
+
+      # One retry, and it is allowed to fail the job. The first attempt
+      # absorbed the blip class; a second failure is no longer a blip, and
+      # `publish` and the gate both need to see that this board did not
+      # deliver rather than find out from a stale release asset.
+      #
+      # `overwrite` because a first attempt that dies mid-upload has already
+      # claimed the artifact name, and v4 refuses a duplicate.
+      - name: Upload build artifacts (retry)
+        if: github.event_name != 'pull_request' && steps.upload.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: fw-${{ matrix.platform }}
           if-no-files-found: ignore
           retention-days: 1
-          path: |
-            output/images/openipc*.tgz
-            output/images/sizes.*.json
-            output/images/kconfig-graph.*.json
-            output/images/kconfig-help.*.json
+          overwrite: true
+          path: output/images/openipc*.tgz
 
       # A Telegram notification, and nothing else. The image it announces was
       # handed to the `publish` job by the step above, so whether this call
@@ -743,6 +825,76 @@ jobs:
             done
           }
 
+          # A board whose rootfs outgrew its fixed slot ships only the -split
+          # package (Makefile, FIXED_SLOTS_SKIP), and --clobber never touches
+          # the plain package it no longer builds. That left
+          # openipc.hi3518cv100-nor-lite.tgz on nightly and latest as of
+          # 2026-11-15, without the sensor-clock fix #1352's reporter was
+          # told to install the day after. The fixed slots are not coming
+          # back (the split layout is the standard), so a plain package this
+          # build superseded goes. Only for boards in this build: one that
+          # did not build keeps both packages it had.
+          #
+          # Runs dispatched on different refs are in different concurrency
+          # groups and write the same two releases, so "not in my dist/" alone
+          # could delete a plain package another run has just uploaded. It goes
+          # only when it is older than the split package this run put on the
+          # release: one written after that belongs to a later build and stays.
+          # Not a job-level concurrency group: that keeps one pending publish
+          # and cancels the one before it, losing a whole build's upload.
+          #
+          # The delete is by the asset id read with that timestamp, not by
+          # name. --clobber replaces an asset with a new id, so a plain package
+          # re-uploaded between the read and the delete is not the one deleted:
+          # the old id is gone, and that answer means keep.
+          # drop_asset <tag> <name> <repos/.../releases/assets/ID>: delete
+          # that asset id. Not gh_retry: an id another run has since replaced
+          # answers 404 on every attempt, which is the expected outcome, not a
+          # reason to spend seven minutes backing off and fail the publish.
+          drop_asset() {
+            local n=0 delay=15
+            until gh api -X DELETE "$3" >/dev/null; do
+              if ! gh api "$3" >/dev/null 2>&1; then
+                echo "[$1] $2: asset ${3##*/} is gone (replaced by another run); keeping what is there"
+                return 0
+              fi
+              n=$((n + 1))
+              # Cleanup, not publishing: a stale package left one more night
+              # costs less than the latest uploads still to come.
+              if [ "$n" -ge 6 ]; then
+                echo "::warning::could not delete $2 (${3##*/}) from $1; it stays until the next publish"
+                return 0
+              fi
+              echo "::warning::delete of $2 failed, sleeping ${delay}s before retry"
+              sleep "$delay"
+              delay=$((delay * 2))
+            done
+          }
+
+          drop_superseded_fixed() { # <tag>
+            local tag="$1" have split plain t_split t_plain api
+            have=$(gh_retry gh release view "$tag" --json assets \
+              --jq '.assets[] | "\(.name) \(.updatedAt) \(.apiUrl)"')
+            for split in "${IMAGES[@]}"; do
+              case "${split##*/}" in *-nor-*-split.tgz) ;; *) continue ;; esac
+              plain="${split##*/}"
+              plain="${plain%-split.tgz}.tgz"
+              [ -e "dist/${plain}" ] && continue
+              t_plain=$(awk -v n="$plain" '$1 == n { print $2 }' <<<"$have")
+              api=$(awk -v n="$plain" '$1 == n { print $3 }' <<<"$have")
+              [ -n "$t_plain" ] || continue
+              t_split=$(awk -v n="${split##*/}" '$1 == n { print $2 }' <<<"$have")
+              # ISO 8601 UTC from the same API: string order is time order.
+              if [ -z "$t_split" ] || [[ ! "$t_plain" < "$t_split" ]]; then
+                echo "[${tag}] ${plain}: written at ${t_plain}, not before ${split##*/} (${t_split:-absent}); keeping"
+                continue
+              fi
+              echo "[${tag}] ${plain}: superseded by ${split##*/}, deleting ${api##*/}"
+              drop_asset "$tag" "$plain" "${api#https://api.github.com/}"
+              sleep 1
+            done
+          }
+
           # `webui=` is what the next preflight diffs against to notice a WebUI-only
           # change; drop the line rather than record an empty value, so a failed
           # lookup reads as "unknown" and builds instead of matching a future empty.
@@ -751,43 +903,142 @@ jobs:
             NOTES=$(printf '%s\nwebui=%s\n' "$NOTES" "$WEBUI_DIGEST")
           fi
 
-          # Full asset set (firmware images + sizes/kconfig sidecars) → dated.
-          mapfile -t DATED < <(find dist -maxdepth 1 -type f | sort)
-          # nightly/latest are firmware-delivery aliases for flashers, so ship
-          # only the firmware images there — re-uploading the small JSON sidecars
-          # to two more releases is pure rate-limit cost for no consumer.
+          # Releases carry firmware and nothing else. The size reports and
+          # kconfig graphs that used to ride along as ~300 small JSON sidecars
+          # per build reach openipc.org once, from the report job below, out of
+          # their own reports-* artifacts. That also takes most of the paced
+          # uploads -- and most of the rate-limit exposure -- off this job.
           mapfile -t IMAGES < <(find dist -maxdepth 1 -type f -name 'openipc*.tgz' | sort)
 
-          # --- dated: immutable per-build history ---
-          ensure_release "$BUILD_ID" --prerelease --title "$BUILD_ID"
-          upload_paced "$BUILD_ID" "${DATED[@]}"
-          # Completion marker, uploaded LAST: its presence is the single downstream
-          # signal that the dated release finished publishing. firmware-explorer's
-          # prebuild gates ingestion on it so a rate-limit-truncated release is
-          # never indexed as a complete build.
-          printf '{"build_id":"%s","expected_assets":%s,"head_sha":"%s","built_at":"%s"}\n' \
-            "$BUILD_ID" "${#DATED[@]}" "$HEAD_SHA" "$BUILT_AT" > dist/_manifest.json
-          gh_retry gh release upload "$BUILD_ID" dist/_manifest.json --clobber
-
-          # nightly and latest only ever move when there is firmware to move
-          # them to. dist/ can be sidecars and no images -- one board that
-          # produced a size report and no .tgz is enough -- and pointing the
-          # two tags flashers pull from at a build with no images behind them
-          # is worse than leaving them on yesterday's.
+          # Nothing moves when there is no firmware to move it to. A dated
+          # release with nothing in it, or the two tags flashers pull from
+          # pointing at one, is worse than leaving everything on yesterday's.
           if [ "${#IMAGES[@]}" -eq 0 ]; then
-            echo "::warning::no images in this build; leaving nightly and latest where they are"
+            echo "::warning::no images in this build; no dated release, and nightly and latest stay where they are"
           else
+            # --- dated: immutable per-build history ---
+            ensure_release "$BUILD_ID" --prerelease --title "$BUILD_ID"
+            upload_paced "$BUILD_ID" "${IMAGES[@]}"
+
             # --- rolling nightly: move tag + body to this build, refresh images ---
             ensure_release nightly
             gh_retry gh release edit nightly --notes "$NOTES"
             gh_retry gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/nightly" -f sha="$HEAD_SHA" -F force=true
             upload_paced nightly "${IMAGES[@]}"
+            drop_superseded_fixed nightly
 
             # --- latest: legacy alias ---
             ensure_release latest
             gh_retry gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/latest" -f sha="$HEAD_SHA" -F force=true
             upload_paced latest "${IMAGES[@]}"
+            drop_superseded_fixed latest
           fi
+
+  # openipc.org learns about the build here, once: which images were published
+  # and their digests, each board's size report and kconfig graph, and the SoC
+  # aliases. It never polls GitHub for any of it, and none of it is uploaded to
+  # a release for anyone to find. The contract, and who may push, is
+  # https://github.com/OpenIPC/website/blob/master/service/internal/builds/PUSH.md
+  #
+  # Authorization is this job's OIDC token (audience https://openipc.org),
+  # which openipc.org checks against the repository, this workflow and
+  # master. There is no secret to store or rotate.
+  #
+  # A job of its own, after publish, so that:
+  #   - openipc.org being down cannot cost a published nightly anything;
+  #   - the push can be re-run by itself once it is back, because the push is
+  #     idempotent by build id. It reads the release and the reports-*
+  #     artifacts, which are kept a week.
+  # Not in ci-gate's needs, for the same reason.
+  report:
+    name: Report build to openipc.org
+    needs: [preflight, publish]
+    if: >-
+      !cancelled() &&
+      github.event_name != 'pull_request' &&
+      needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    # id-token is what authorizes the push, so nothing but this repository's
+    # own scripts, at the built commit, runs here: the artifacts are read as
+    # data, never executed. actions: read is for counting the reports-*
+    # artifacts the matrix uploaded (the guard below).
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    timeout-minutes: 20
+    steps:
+      # First: checkout cleans the workspace, so anything downloaded before it
+      # would be deleted. The push script and the defconfigs, at the commit
+      # that was built -- the aliases come from the same tree as the images.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.head_sha }}
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .github/scripts/
+            br-ext-chip-*/configs/
+
+      # The reports only, outside the checkout. The images are described from
+      # the release itself below, so nothing here depends on the one-day fw-*
+      # artifacts, and a re-run works for as long as the reports are kept (a
+      # week).
+      - name: Download reports
+        id: reports
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: reports-*
+          path: ${{ runner.temp }}/reports
+          merge-multiple: true
+
+      # What was published, as GitHub has it: each image's size and the
+      # sha256 GitHub computed on upload. publish creates no dated release
+      # when there were no images, and then there is nothing to report.
+      #
+      # "No reports produced" and "reports lost" look the same to the push --
+      # platforms without detail -- and only the first is acceptable. So if the
+      # matrix uploaded any reports-* artifact, some report has to be here.
+      - name: Push the build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          REPORTS: ${{ runner.temp }}/reports
+          DOWNLOAD: ${{ steps.reports.outcome }}
+          BUILD_ID: ${{ needs.preflight.outputs.build_id }}
+          HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          BUILT_AT: ${{ needs.preflight.outputs.built_at }}
+          WEBUI_DIGEST: ${{ needs.preflight.outputs.webui_digest }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$BUILD_ID" --json assets > release.json; then
+            echo "::notice::no release $BUILD_ID; nothing to report"
+            exit 0
+          fi
+          uploaded=$(gh api "repos/${GH_REPO}/actions/runs/${RUN_ID}/artifacts" --paginate \
+            --jq '.artifacts[] | select(.name | startswith("reports-")) | select(.expired | not) | .name' | wc -l)
+          # A missing directory is zero reports, not a failed step: find's
+          # non-zero exit would otherwise end it under pipefail.
+          found=0
+          if [ -d "$REPORTS" ]; then
+            found=$(find "$REPORTS" -maxdepth 1 -name '*.json' | wc -l)
+          fi
+          echo "reports-* artifacts uploaded: ${uploaded}; report files here: ${found}"
+          if [ "$uploaded" -gt 0 ] && { [ "$DOWNLOAD" != success ] || [ "$found" -eq 0 ]; }; then
+            echo "::error::the matrix uploaded ${uploaded} reports-* artifact(s) but none reached this job (download: ${DOWNLOAD}); refusing to push platforms without their reports"
+            exit 1
+          fi
+          python3 .github/scripts/push_build.py \
+            --source firmware \
+            --build-id "$BUILD_ID" \
+            --sha "$HEAD_SHA" \
+            --built-at "$BUILT_AT" \
+            --webui-digest "$WEBUI_DIGEST" \
+            --reports "$REPORTS" \
+            --release-json release.json \
+            --match '^openipc\..*\.tgz$' \
+            --aliases-root .
 
   # "The nightly is red" does not say whether one board broke or ninety-four.
   # On 2026-08-12 (run 31649720825) a majestic-webui fixup did a bare `rm` on

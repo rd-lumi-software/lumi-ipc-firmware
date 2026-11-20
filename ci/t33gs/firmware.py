@@ -105,8 +105,8 @@ def adapt_updater(text):
         ('vendor=$(ipcinfo -v)', 'vendor=ingenic'),
         ('flash_type=$(ipcinfo -F)', 'flash_type=nor'),
         ('get_device() {', 'get_device() {\n\t[ "$1" = rootfs ] && set -- root'),
-        ('check_soc "$(head -1 $y/etc/hostname | cut -d- -f2)"',
-         'check_soc "$(sed -n \'s/^BUILD_PLATFORM=//p\' "$y/etc/os-release" | cut -d_ -f1)"'),
+        ('\t\t[ -n "$image_model" ] || image_model=$(head -1 "$y/etc/hostname" | cut -d- -f2)',
+         '\t\t[ -n "$image_model" ] || die "Missing T33gs image build platform"'),
         ('local ksoc=$(od -j 32 -N 32 -S 1 -A n "$x" | cut -d- -f3)',
          '''local ksoc=$(od -j 32 -N 32 -S 1 -A n "$x" | cut -d- -f3)
             # This source-built kernel uses its Linux release as the uImage

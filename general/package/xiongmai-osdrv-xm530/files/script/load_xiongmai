@@ -6,7 +6,7 @@ MODULE=/lib/modules/3.10.103+/xiongmai
 MEM_START=0x800
 MEM_SAMALL_LIN=0x1
 
-MEM_OS=$(cat /proc/cmdline | awk '{print $1}' | sed -e 's/mem=//' -e 's/M//')
+MEM_OS=$(tr ' ' '\n' </proc/cmdline | sed -n 's/^mem=\([0-9]*\)M$/\1/p' | head -1)
 MEM_LEN=$(echo "$MEM_ALL $MEM_OS"|awk '{printf("0x%03x00000",$1-$2)}')
 MEM_START=$(echo "$MEM_START $MEM_SAMALL_LIN $MEM_OS"|awk '{printf("0x%03x00000",$1+$2*$3)}')
 echo MEM_START="$MEM_START" MEM_LEN="$MEM_LEN"
@@ -47,6 +47,72 @@ remove_audio() {
 	rmmod -w xm_i2s
 }
 
+# VI: the open driver when xiongmai-opensdk installed it (OpenIPC/openxiongmai
+# drivers/xm_vi, the same /dev/vi without the vendor module's freeze at VI init
+# and its vmalloc leak), the vendor's otherwise. mmz is loaded by then.
+insert_vi() {
+	modprobe open_vi buffer=$VI_BUFF 2>/dev/null ||
+		insmod xm530_vi.ko buffer=$VI_BUFF
+}
+
+# MMZ, likewise: the open driver when installed, the vendor's otherwise. An
+# image with open_mmz keeps the vendor module outside the depmod tree, so the
+# two do not both provide the same symbols. Without either, nothing that
+# needs one can load.
+#
+# set_allocator cma boots with the media share as a CMA area (cma=) and leaves
+# only the top 1 MB out of Linux, for xm530_rgn: open_mmz then takes every
+# other block from CMA. Only open_mmz can, and the fixed zone is 1 MB then, so
+# a failure there stops the media modules rather than start them on it.
+#
+# set_allocator hybrid boots with mem= the OS share and a CMA area of its own
+# (cma=), the zone above mem= as with xm: open_mmz takes blocks from the zone
+# and borrows from CMA only when the zone is full. Only open_mmz can.
+insert_mmz() {
+	vendor_mmz=mmz.ko
+	[ -f "$vendor_mmz" ] || vendor_mmz=/usr/lib/xiongmai/mmz.ko
+	for a in cma hybrid; do
+		grep -q "mmz_allocator=$a" /proc/cmdline || continue
+		modprobe open_mmz allocator=$a mmz_start="$MEM_START" \
+			mmz_size="$MEM_LEN" && return
+		logger -s -p daemon.err -t xiongmai \
+			"open_mmz allocator=$a failed; set_allocator xm restores the fixed zone"
+		report_error
+	done
+	modprobe open_mmz mmz_start="$MEM_START" mmz_size="$MEM_LEN" 2>/dev/null ||
+		insmod "$vendor_mmz" mmz_start="$MEM_START" mmz_size="$MEM_LEN" ||
+		report_error
+}
+
+remove_mmz() {
+	rmmod -w open_mmz 2>/dev/null || rmmod -w mmz
+}
+
+# The ISP device: OpenIPC/openxiongmai drivers/xm530_isp (open_isp.ko), when
+# xiongmai-opensdk installed it, the vendor's xm530_isp.ko otherwise.
+insert_isp() {
+	modprobe open_isp 2>/dev/null || modprobe xm530_isp
+}
+
+remove_isp() {
+	rmmod -w open_isp 2>/dev/null || rmmod -w xm530_isp
+}
+
+# Regions (OSD): OpenIPC/openxiongmai drivers/xm530_rgn (open_rgn.ko), when
+# xiongmai-opensdk installed it, the vendor's xm530_rgn.ko otherwise. The open
+# one keeps its bitmaps in its own memory, not in an MMZ block.
+insert_rgn() {
+	modprobe open_rgn 2>/dev/null || modprobe xm530_rgn
+}
+
+remove_rgn() {
+	rmmod -w open_rgn 2>/dev/null || rmmod -w xm530_rgn
+}
+
+remove_vi() {
+	rmmod -w open_vi 2>/dev/null || rmmod -w xm530_vi
+}
+
 insert_sns() {
 	#Sensor clock 27MHz
 	#regs 0x2000002c 1;
@@ -66,13 +132,14 @@ remove_sns() {
 insert_ko() {
 	# driver load
 	insert_sns > /dev/null
-	insmod mmz.ko mmz_start="$MEM_START" mmz_size="$MEM_LEN"
-	insmod xm530_vi.ko buffer=$VI_BUFF
-	insmod xm530_isp.ko
-	insmod xm530_rgn.ko
+	insert_mmz
+	insert_vi
+	insert_isp
+	insert_rgn
 	insmod xm530_h264.ko
 	insmod xm_rtc.ko
-	insmod xm_wdt.ko
+	# The watchdog is the kernel's sp805_wdt (/dev/watchdog), not xm_wdt.ko: see
+	# OpenIPC/firmware#2611.
 	insmod log.ko
 	insert_audio
 	insert_h265
@@ -81,13 +148,12 @@ insert_ko() {
 
 remove_ko() {
 	remove_audio
-	rmmod -w xm_wdt
 	rmmod -w xm_rtc
 	rmmod -w xm530_h264
-	rmmod -w xm530_rgn
-	rmmod -w xm530_isp
-	rmmod -w xm530_vi
-	rmmod -w mmz
+	remove_rgn
+	remove_isp
+	remove_vi
+	remove_mmz
 	remove_sns
 }
 
@@ -96,8 +162,10 @@ make_symlink() {
 		SNS_TYPE=$(ipcinfo --short-sensor)
 		logger -s -p daemon.info -t xiongmai "You sensor is $SNS_TYPE and symlink to libsns.so not found"
 
+		# Sensors driven by libsns_X50_XM530 (see the openxiongmai README) that
+		# ipcinfo names unambiguously; everything else is in X123.
 		case $SNS_TYPE in
-			imx335|sc335e)
+			imx335|sc335e|sc5235|sc5332)
 				logger -s -p daemon.info -t xiongmai "Create new symlink to libsns_X50_XM530.so"
 				ln -sf /usr/lib/sensors/libsns_X50_XM530.so /usr/lib/libsns.so
 				;;
@@ -106,6 +174,55 @@ make_symlink() {
 				ln -sf /usr/lib/sensors/libsns_X123_XM530.so /usr/lib/libsns.so
 				;;
 		esac
+	fi
+}
+
+# The Dashboard, the default hostname (S31hostname) and extutils read the
+# sensor out of the U-Boot environment, which every other vendor's load script
+# fills in. This one never did, so every Xiongmai camera showed "unknown" there
+# whatever ipcinfo detected (OpenIPC/openxiongmai#8). Probed once the sensor
+# clock and I2C are up, and written only when the variable is missing: a value
+# already there is the owner's, and a failed probe is never stored, which would
+# latch it (#2428).
+record_sensor() {
+	command -v fw_setenv >/dev/null 2>&1 || return 0
+	[ -n "$(fw_printenv -n sensor 2>/dev/null)" ] && return 0
+	local sensor
+	sensor=$(ipcinfo --short-sensor 2>/dev/null)
+	case "$sensor" in "" | unknown) return 0 ;; esac
+	fw_setenv sensor "$sensor" &&
+		logger -s -p daemon.info -t xiongmai "Writing $sensor to U-Boot ENV"
+}
+
+# The XM530 install commands give Linux mem=35M of the XM530's 64 MB, and an
+# XM550 installed with them unchanged keeps that 35M of its 128 MB: Linux
+# runs in 32 MB beside a 93 MB media zone, and on that split the #2853 board
+# could not run past 1080p. Moved to 72/56 it ran for days with the SC5332's
+# full 2592x1944 main stream and a sub-stream: 31.3 MB of the zone in use,
+# where 64 MB for Linux had been too tight. Only the untouched 35M of the
+# plain xm layout moves: any other split, and every cma or hybrid layout,
+# booted or written for the next boot, is the owner's. It applies at the
+# next boot; this one keeps the zone it already handed out. The environment
+# decides as well as this boot because a builder customizer that has just
+# written its own split reboots into it a few seconds later, and this must
+# not overwrite that split before then.
+fix_xm550_split() {
+	[ "$chipid" = xm550 ] && [ "$MEM_OS" = 35 ] || return 0
+	grep -q -E '(^| )(cma|mmz_allocator)=' /proc/cmdline && return 0
+	local stored out
+	stored=" $(fw_printenv -n bootargs 2>/dev/null) "
+	case "$stored" in
+	*" cma="* | *" mmz_allocator="*) return 0 ;;
+	*" mem=35M "*) ;;
+	*) return 0 ;;
+	esac
+	command -v set_allocator >/dev/null 2>&1 || return 0
+	if out=$(set_allocator xm 72 2>&1); then
+		logger -s -p daemon.info -t xiongmai \
+			"XM550 booted with the XM530's mem=35M; mem=72M from the next boot"
+	else
+		logger -s -p daemon.warn -t xiongmai \
+			"XM550 left at mem=35M: $(echo "$out" | tail -1)"
 	fi
 }
 
@@ -123,6 +240,8 @@ if [ "$1" = "-i" ]; then
 	cd $MODULE
 	insert_ko
 	make_symlink
+	record_sensor
+	fix_xm550_split
 fi
 
 if [ "$1" = "-r" ]; then

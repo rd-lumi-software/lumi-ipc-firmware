@@ -10,14 +10,47 @@ GOKE_OSDRV_GK7205V500_LICENSE = MIT
 GOKE_OSDRV_GK7205V500_LICENSE_FILES = LICENSE
 GOKE_OSDRV_GK7205V500_INSTALL_STAGING = YES
 
-define GOKE_OSDRV_GK7205V500_INSTALL_TARGET_CMDS
-	$(INSTALL) -m 755 -d $(TARGET_DIR)/etc/sensors
-	$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/config/*.ini
+# The V500 SDK has two halves. The implementation is libxmedia_*.so, which
+# export MPI_* / XMEDIA_API_*; beside them the vendor ships libhi_*.so, thin
+# shims that re-export the HiSilicon-spelled HI_MPI_* names and forward each
+# one to its XMEDIA_API_* twin. majestic links against the shimmed half --
+# its FindHiSiliconSDK gives SDK code 7205500 the same hi_mpi/hi_md/hi_isp/
+# hi_ive/hi_ae/hi_awb list as the GK7205V200 -- so without these six, and
+# without libvqe.so that libxmedia_api.so needs for its audio_vqe_* calls,
+# musl refuses to start it at all ("Error loading shared library
+# libhi_mpi.so", then ~250 HI_MPI_* relocation failures) and the camera
+# streams nothing. Reported on a GK7202V500 in #2428; goke-osdrv-gk7205v200
+# has shipped its own libhi_* shims since the family was added.
+#
+# Only a majestic image can use them, so the three lite boards that share this
+# package do not pay the 32KB. They go in as majestic's own post-install hook
+# rather than in this package's install step: turning majestic on in an
+# existing build reinstalls majestic, but leaves this package's install stamp
+# alone, so a gate in here shipped majestic without the libraries it needs to
+# start (#2607). Buildroot parses every package's .mk whether it is selected or
+# not, so the hook is keyed on this package as well as on majestic. Otherwise
+# every majestic board would get these shims, and on gk7205v200 they would
+# replace that package's own libhi_*.so with ones that forward to a
+# libxmedia_api.so those images do not have.
+ifeq ($(BR2_PACKAGE_GOKE_OSDRV_GK7205V500)$(BR2_PACKAGE_MAJESTIC),yy)
+define GOKE_OSDRV_GK7205V500_INSTALL_MAJESTIC_LIBS
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libhi_ae.so
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libhi_awb.so
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libhi_isp.so
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libhi_ive.so
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libhi_md.so
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libhi_mpi.so
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libvqe.so
+endef
+MAJESTIC_POST_INSTALL_TARGET_HOOKS += GOKE_OSDRV_GK7205V500_INSTALL_MAJESTIC_LIBS
+endif
 
-	$(INSTALL) -m 755 -d $(TARGET_DIR)/etc/sensors/iq
-	$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/sensors/iq $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/iq/sc2232.ini
-	ln -sf sc2232.ini $(TARGET_DIR)/etc/sensors/iq/default.ini
-
+# GK7201V200 takes its vendor modules from hisilicon-opensdk instead: the
+# XMedia SDK's V200 set, rebuilt from source and relinked against this
+# kernel. The prebuilt set below is the V500 one, which on that die gets as
+# far as the ISP and then fails VENC CreateChn (F008FFFF, #2464).
+ifneq ($(BR2_PACKAGE_HISILICON_OPENSDK),y)
+define GOKE_OSDRV_GK7205V500_INSTALL_KMODS
 	$(INSTALL) -m 755 -d $(TARGET_DIR)/lib/modules/4.9.37/goke
 	$(INSTALL) -m 644 -t $(TARGET_DIR)/lib/modules/4.9.37/goke $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/kmod/xm_acodec.ko
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/lib/modules/4.9.37/goke $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/kmod/xm_adc.ko
@@ -58,6 +91,57 @@ define GOKE_OSDRV_GK7205V500_INSTALL_TARGET_CMDS
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/lib/modules/4.9.37/goke $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/kmod/xm_vo.ko
 	$(INSTALL) -m 644 -t $(TARGET_DIR)/lib/modules/4.9.37/goke $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/kmod/xm_vpss.ko
 	$(INSTALL) -m 644 -t $(TARGET_DIR)/lib/modules/4.9.37/goke $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/kmod/xm_wdt.ko
+endef
+endif
+
+# ...and the userspace half to match: the kernel<->userspace MPI boundary is
+# binary, so libxmedia_* have to come from the same (V200) set as the
+# modules. These are the SDK's V200 builds of the libraries that differ from
+# the V500 ones installed above; the rest are byte-identical.
+#
+# Provenance: XMediaIPCLinuxV100R002C00SPC020 (MPP_V1.0.0.0 B00, built Apr
+# 2023 -- the release openhisilicon's gk7205v500 modules come from),
+# source/gmp/obj_ko_lib/V200/linux-4.9.y/lib_nolog/share/, copied unmodified.
+# files/lib/v200/SHA256SUMS pins them and the install checks it, so a
+# swapped or truncated blob fails the build instead of shipping.
+ifeq ($(OPENIPC_SOC_MODEL),gk7201v200)
+define GOKE_OSDRV_GK7205V500_INSTALL_V200_LIBS
+	cd $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/v200 && sha256sum -c --quiet SHA256SUMS
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/v200/*.so
+	# Sensor profiles only GK7201V200 boards carry (SP2308, see
+	# hisilicon-opensdk), kept out of the family-wide *.ini glob above so the
+	# other dies' rootfs do not pay for them.
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/config/gk7201v200/*.ini
+endef
+endif
+
+# The SDK's NPU runtime, for the V500-set dies that carry one:
+# libxmedia_cl.so loads and runs a compiled .xmm graph, libxmedia_ai.so is
+# the vendor's person/face/car detector on top. Both reach /dev/npu.0
+# through libxmedia_npu.so, which hisilicon-opensdk builds from source along
+# with the driver, so without opensdk there is nothing for them to talk to.
+# Nothing in the image calls them yet, so the lite boards skip the 300KB;
+# ultimate gets them for user programs.
+ifeq ($(BR2_PACKAGE_HISILICON_OPENSDK)$(OPENIPC_VARIANT),yultimate)
+ifneq ($(OPENIPC_SOC_MODEL),gk7201v200)
+define GOKE_OSDRV_GK7205V500_INSTALL_NPU_LIBS
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libxmedia_cl.so
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libxmedia_ai.so
+endef
+endif
+endif
+
+define GOKE_OSDRV_GK7205V500_INSTALL_TARGET_CMDS
+	$(INSTALL) -m 755 -d $(TARGET_DIR)/etc/sensors
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/config/*.ini
+
+	$(INSTALL) -m 755 -d $(TARGET_DIR)/etc/sensors/iq
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/sensors/iq $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/iq/sc2232.ini
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/sensors/iq $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/iq/sc2336.ini
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/sensors/iq $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/iq/sc401ai.ini
+	ln -sf sc2232.ini $(TARGET_DIR)/etc/sensors/iq/default.ini
+
+	$(GOKE_OSDRV_GK7205V500_INSTALL_KMODS)
 
 	$(INSTALL) -m 755 -d $(TARGET_DIR)/usr/bin
 	$(INSTALL) -m 755 -t $(TARGET_DIR)/usr/bin $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/script/load*
@@ -99,12 +183,22 @@ define GOKE_OSDRV_GK7205V500_INSTALL_TARGET_CMDS
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_q03.so
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc2231.so
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc2235.so
-	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc223a.so
+	# SC223A is the die behind the SC5239S these boards are sold with, and the
+	# SC2239P and SC233A labels too -- one part, several names, which is why the
+	# sensor the seller advertises is not the one the driver is called after.
+	# sc223a_i2c_1080p.ini already ships and names this driver, so only the half
+	# majestic dlopens from /usr/lib/sensors was missing and a camera with this
+	# sensor had no video however it was configured. The four-lane
+	# 4l_sc223a_i2c_1080p.ini beside it is NOT served by this: it names
+	# libsns_sc223a_4l.so, which the V500 SDK does not carry in any flavour.
+	# It is one of six configs here naming a driver this package does not have
+	# (the others are jxf23, jxf23_dc, mis2008, sc200ai, sc2232h), inherited
+	# with the config set from a family whose SDK did. #2428.
+	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc223a.so
 	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc2336.so
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc3235.so
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc3335.so
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc3336.so
-	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc401ai.so
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc4236.so
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc4336.so
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib/sensors $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/sensor/libsns_sc500ai.so
@@ -138,7 +232,7 @@ define GOKE_OSDRV_GK7205V500_INSTALL_TARGET_CMDS
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libvqe_gain.so
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libvqe_hpf.so
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libvqe_res.so
-	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libvqe.so
+	# libvqe.so is installed by GOKE_OSDRV_GK7205V500_INSTALL_MAJESTIC_LIBS above.
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libvqe_talkv2.so
 	# $(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libvqe_wnr.so
 	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libxmedia_ae.so
@@ -153,6 +247,8 @@ define GOKE_OSDRV_GK7205V500_INSTALL_TARGET_CMDS
 	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libxmedia_qr.so
 	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(GOKE_OSDRV_GK7205V500_PKGDIR)/files/lib/libxmedia_tde.so
 
+	$(GOKE_OSDRV_GK7205V500_INSTALL_V200_LIBS)
+	$(GOKE_OSDRV_GK7205V500_INSTALL_NPU_LIBS)
 endef
 
 $(eval $(generic-package))

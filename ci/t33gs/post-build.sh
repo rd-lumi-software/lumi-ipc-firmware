@@ -22,6 +22,6 @@ if [[ ${T33_RUNTIME_PREINSTALLED:-0} != 1 ]]; then
  mkdir -p "$BUILD_DIR/linux-custom"
  cp "$T33_4494_OUTPUT_DIR/sdk/kernel-4.4.94/COPYING" "$BUILD_DIR/linux-custom/COPYING"
 fi
-python3 "$here/firmware.py" install-updater "$here/../../general/overlay/usr/sbin/sysupgrade" \
+python3 "$here/firmware.py" install-updater "$here/../../lumi/overlay/usr/sbin/sysupgrade" \
   "$target/usr/sbin/lumi-sysupgrade"
 bash "$here/../../lumi/scripts/post-build-t33-runtime.sh" "$target"
