@@ -157,6 +157,8 @@ class PipelineTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('#!/bin/sh\nexit 0\n')
                 path.chmod(0o755)
+            (runtime / 'bin/lumi-t33gs-relay-agent').write_text(
+                '#!/bin/sh\nreadonly logfile=/tmp/lumi-t33gs-relay-agent.log\n')
             gateway = runtime / 'bin/ipc-stream-services'
             (runtime / 'bin/ipc-stream-services.build-info').write_text(
                 'webrtc_backend=str0m; srtp=t33gs-dma-aes-aes128-gcm-direct-mxu2-ghash\n'
@@ -191,6 +193,8 @@ class PipelineTests(unittest.TestCase):
                                stdout=subprocess.DEVNULL)
             install()
             self.assertEqual((target / 'lumi/bin/relay-agent.t33gs').read_bytes(), b'relay')
+            self.assertIn('readonly logfile=/tmp/log/lumi-t33gs-relay-agent.log\n',
+                          (target / 'lumi/bin/lumi-t33gs-relay-agent').read_text())
             self.assertTrue((target / 'lumi/bin/ipc-voice-worker').is_file())
             self.assertEqual((target / 'lumi/firmware/wake.rvpack').read_bytes(), payload.read_bytes())
             voice.unlink()

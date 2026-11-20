@@ -4,12 +4,13 @@ SYS_BLOCK=/sys/class/block
 DEV_ROOT=/dev
 MOUNTINFO=/proc/self/mountinfo
 RUN_DIR=/tmp/lumi-sd-check
+LOG_DIR=/tmp/log
 
 is_block() { [ -b "$1" ]; }
 card_id() { cat "$SYS_BLOCK/mmcblk0/device/cid" 2>/dev/null; }
 report() {
  printf '%s\n' "$1" > "$RUN_DIR/status"
- printf 'component=sd-check state=%s detail=%s\n' "$1" "$2" >> "$RUN_DIR/check.log"
+ printf 'component=sd-check state=%s detail=%s\n' "$1" "$2" >> "$logfile"
  echo "Lumi SD: $1 ($2)"
 }
 select_volume() {
@@ -46,7 +47,7 @@ check_start() {
  cid=$(card_id); [ -n "$cid" ] || { report fault identity-unavailable; return 1; }
  observe_mounts || return 1
  if [ -n "$mounted_points" ]; then
-  timeout 10 umount "$target" >> "$RUN_DIR/check.log" 2>&1 || { report fault unmount-failed; return 1; }
+  timeout 10 umount "$target" >> "$logfile" 2>&1 || { report fault unmount-failed; return 1; }
  fi
  observe_mounts || return 1
  [ -z "$mounted_points" ] || { report fault still-mounted; return 1; }
@@ -57,7 +58,7 @@ check_start() {
   # Retain a descriptor for the selected device over check and repair.
   if exec 9<>"$device"; then
    if same_card; then
-    timeout 30 fsck.fat -n /proc/self/fd/9 >> "$RUN_DIR/check.log" 2>&1
+    timeout 30 fsck.fat -n /proc/self/fd/9 >> "$logfile" 2>&1
     checked=$?
     if [ "$checked" = 0 ]; then verified=yes
     elif [ "$checked" = 1 ]; then
@@ -65,12 +66,12 @@ check_start() {
      observe_mounts || return 1
      [ -z "$mounted_points" ] || { report fault mounted-during-check; return 1; }
      report repairing fat-inconsistent
-     timeout 30 fsck.fat -a /proc/self/fd/9 >> "$RUN_DIR/check.log" 2>&1
+     timeout 30 fsck.fat -a /proc/self/fd/9 >> "$logfile" 2>&1
      repaired=$?
      # dosfstools exit1 is ambiguous. Only an independent no-write pass
      # with exit0 permits RW; standard fsck bitmask assumptions do not apply.
      if [ "$repaired" = 0 ] || [ "$repaired" = 1 ]; then
-      if same_card && timeout 30 fsck.fat -n /proc/self/fd/9 >> "$RUN_DIR/check.log" 2>&1; then verified=yes; fi
+      if same_card && timeout 30 fsck.fat -n /proc/self/fd/9 >> "$logfile" 2>&1; then verified=yes; fi
      fi
     fi
    fi
@@ -80,7 +81,7 @@ check_start() {
  same_card || { report fault identity-changed; return 1; }
  mode=ro
  [ "$verified" != yes ] || mode=rw
- if ! mount -t vfat -o "$mode" "$device" "$target" >> "$RUN_DIR/check.log" 2>&1; then
+ if ! mount -t vfat -o "$mode" "$device" "$target" >> "$logfile" 2>&1; then
   report fault mount-failed; return 1
  fi
  if [ "$verified" = yes ]; then report ready checked-offline; return 0; fi
@@ -95,13 +96,14 @@ check_stop() {
  done
  observe_mounts || return 1
  if [ -n "$mounted_points" ]; then
-  timeout 10 umount "$target" >> "$RUN_DIR/check.log" 2>&1 || { report busy unmount-failed; return 1; }
+  timeout 10 umount "$target" >> "$logfile" 2>&1 || { report busy unmount-failed; return 1; }
  fi
  report unmounted orderly-shutdown
 }
 main() {
  umask 077
- mkdir -p "$RUN_DIR" || return 1
+ mkdir -p "$RUN_DIR" "$LOG_DIR" || return 1
+ logfile=$LOG_DIR/lumi-sd-check.log
  case "${1:-}" in start|stop) ;; *) echo 'usage: lumi-sd-check start|stop' >&2; return 2;; esac
  if ! mkdir "$RUN_DIR/lock" 2>/dev/null; then
   owner=$(cat "$RUN_DIR/lock/pid" 2>/dev/null || true)

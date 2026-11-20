@@ -36,7 +36,7 @@ exit "${code:-0}"
             script = '''
 . "$HELPER"
 SYS_BLOCK="$TEST_ROOT/sys"; DEV_ROOT="$TEST_ROOT/dev"
-MOUNTINFO="$TEST_ROOT/mountinfo"; RUN_DIR="$TEST_ROOT/run"
+MOUNTINFO="$TEST_ROOT/mountinfo"; RUN_DIR="$TEST_ROOT/run"; LOG_DIR="$TEST_ROOT/log"
 is_block() { [ -f "$1" ]; }
 mkdir() {
  if [ "$1" = -p ] && [ "$2" = /mnt/mmcblk0p1 ]; then return 0; fi
@@ -68,6 +68,9 @@ main "$ACTION"
             result = subprocess.run(['sh','-c',script],env=env,capture_output=True,text=True,timeout=5)
             events=(root/'events').read_text() if (root/'events').exists() else ''
             status=(root/'run/status').read_text().strip() if (root/'run/status').exists() else ''
+            if status:
+                self.assertIn(f'component=sd-check state={status} ',
+                              (root/'log/lumi-sd-check.log').read_text())
             return result.returncode,status,events
 
     def test_clean_card_checked_offline_before_rw(self):

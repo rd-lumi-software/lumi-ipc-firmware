@@ -1,9 +1,16 @@
 #!/bin/sh
 
 NAME="lumi-ipc-streamer-watch"
+LOG_DIR="/tmp/log"
 PIDFILE="/var/run/$NAME.pid"
 STREAMER_INIT="/etc/init.d/S60lumi-streamer"
-STREAMER_PIDFILE="/var/run/lumi-ipc-streamer.pid"
+SUPERVISOR_OWNER="/tmp/supervisor.lock/owner"
+READY="/tmp/lumi-supervisor.ready"
+ARMED="/run/lumi-runtime.armed"
+INHIBIT="/run/lumi-runtime.stopped"
+REQUESTED="/run/lumi-runtime.reboot-requested"
+RECOVERY="/overlay/lumi-runtime-recovery"
+OTA_LOCK="/tmp/sysupgrade.lock"
 STREAMER_BIN="/lumi/bin/ipc-stream-supervisor"
 RELAY_INIT="/lumi/bin/lumi-t33gs-relay-agent"
 RELAY_CONFIG="/tmp/lumi-relay.env"
@@ -20,10 +27,14 @@ trim_runtime_log() {
 	bytes=$(stat -c '%s' "$log" 2>/dev/null) || return 0
 	[ "$bytes" -gt 2097152 ] || return 0
 	snapshot="$log.trim.$$"
-	(umask 077; tail -c 1048576 "$log" > "$snapshot") || {
+	if ! (umask 077; tail -c 1048576 "$log" > "$snapshot") ||
+		[ "$(stat -c '%s' "$snapshot" 2>/dev/null)" != 1048576 ]; then
 		rm -f "$snapshot"
+		# BusyBox tail can report ENOSPC and still exit successfully.
+		: > "$log" || return 1
+		logger -t "$NAME" "log truncated without tail: $log"
 		return 0
-	}
+	fi
 	# Append retained data after truncation, rather than overwriting bytes
 	# concurrently appended by the runtime.
 	: > "$log"
@@ -54,9 +65,55 @@ ensure_default_route() {
 }
 
 streamer_running() {
-	[ -s "$STREAMER_PIDFILE" ] || return 1
-	pid=$(cat "$STREAMER_PIDFILE")
-	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+	IFS=' ' read -r supervisor_pid supervisor_start 2>/dev/null < "$SUPERVISOR_OWNER" || return 1
+	case "$supervisor_pid" in ''|*[!0-9]*) return 1 ;; esac
+	IFS= read -r supervisor_stat 2>/dev/null < "/proc/$supervisor_pid/stat" || return 1
+	set -- ${supervisor_stat##*) }
+	[ "$#" -ge 20 ] && [ "$1" != Z ] || return 1
+	shift 19
+	[ "$1" = "$supervisor_start" ]
+}
+
+recovery_inhibited() {
+	[ -e "$INHIBIT" ] || [ -e "$OTA_LOCK" ]
+}
+
+read_recovery() {
+	attempts=0
+	last_boot=-
+	[ ! -e "$RECOVERY" ] || {
+		IFS=' ' read -r attempts last_boot reason < "$RECOVERY" || return 1
+		case "$attempts" in 0|1|2) ;; *) return 1 ;; esac
+		[ -n "$last_boot" ]
+	}
+}
+
+write_recovery() {
+	# Persist the budget before rebooting so even repeated boot failures are bounded.
+	mountpoint -q /overlay || return 1
+	pending="$RECOVERY.new"
+	(umask 077; printf '%s %s %s\n' "$1" "$2" "$3" > "$pending") &&
+		mv -f "$pending" "$RECOVERY"
+}
+
+recover() {
+	[ ! -e "$REQUESTED" ] || return 0
+	recovery_inhibited && return 0
+	streamer_running && return 0
+	: > "$REQUESTED" || return 1
+	if ! read_recovery || [ "$attempts" -ge 2 ]; then
+		logger -t "$NAME" "reboot suppressed: recovery budget exhausted or unreadable"
+		return 0
+	fi
+	IFS= read -r boot_id < /proc/sys/kernel/random/boot_id || return 1
+	[ "$last_boot" != "$boot_id" ] || return 0
+	if ! write_recovery "$((attempts + 1))" "$boot_id" supervisor-exited; then
+		logger -t "$NAME" "reboot suppressed: cannot persist recovery budget"
+		return 1
+	fi
+	recovery_inhibited && return 0
+	logger -t "$NAME" "requesting orderly reboot: supervisor exited (attempt $((attempts + 1))/2)"
+	reboot
 }
 
 relay_running() {
@@ -69,8 +126,39 @@ watch() {
 	[ ! -r /tmp/lumi-boot.env ] || { set -a; . /tmp/lumi-boot.env; set +a; }
 	trap 'exit 0' HUP INT TERM
 	last_ip=""
+	missed=0
+	healthy_since=
+	budget_checked=0
 	while :; do
-		trim_runtime_log /tmp/lumi-streamer.log
+		trim_runtime_log "$LOG_DIR/lumi-streamer.log"
+		trim_runtime_log "$LOG_DIR/$NAME.log"
+		if recovery_inhibited; then
+			missed=0
+			healthy_since=
+			sleep 5
+			continue
+		fi
+		if streamer_running && [ -e "$READY" ]; then
+			[ -e "$ARMED" ] || : > "$ARMED"
+			missed=0
+			IFS=' ' read -r uptime ignored < /proc/uptime
+			now=${uptime%%.*}
+			healthy_since=${healthy_since:-$now}
+			if [ "$budget_checked" = 0 ] && [ "$((now - healthy_since))" -ge 1800 ]; then
+				budget_checked=1
+				if read_recovery && [ "$attempts" -gt 0 ]; then
+					write_recovery 0 "$last_boot" "$reason" ||
+						logger -t "$NAME" "cannot reset recovery budget"
+				fi
+			fi
+		elif ! streamer_running && [ -e "$ARMED" ] && [ ! -e "$REQUESTED" ]; then
+			healthy_since=
+			missed=$((missed + 1))
+			[ "$missed" -lt 3 ] || recover
+		else
+			missed=0
+			healthy_since=
+		fi
 		[ ! -r /tmp/lumi-boot.env ] || { set -a; . /tmp/lumi-boot.env; set +a; }
 		RELAY_KEY="${LUMI_RELAY_KEY:-/overlay/relay-key.json}"
 		current_ip=$(wlan_ip)
@@ -94,38 +182,20 @@ watch() {
 	done
 }
 
-start() {
-	if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-		echo "Starting $NAME: already running (PID $(cat "$PIDFILE"))"
-		return 0
-	fi
-	rm -f "$PIDFILE"
-	watch >>"/tmp/$NAME.log" 2>&1 &
-	pid=$!
-	echo "$pid" >"$PIDFILE"
-	echo "Starting $NAME: OK (PID $pid)"
+main() {
+	case "${1:-}" in
+		run)
+			# BusyBox init owns the foreground watchdog.
+			umask 077
+			mkdir -p "$LOG_DIR" || return 1
+			printf '%s\n' "$$" > "$PIDFILE"
+			watch >>"$LOG_DIR/$NAME.log" 2>&1
+			;;
+		start) : ;;
+		stop) "$STREAMER_INIT" stop ;;
+		restart|reload) echo 'Reboot required to restart the Lumi runtime' >&2; return 1 ;;
+		*) echo "Usage: $0 {start|stop|restart|reload}" >&2; return 1 ;;
+	esac
 }
 
-stop() {
-	if [ -s "$PIDFILE" ]; then
-		pid=$(cat "$PIDFILE")
-		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-			kill -TERM "$pid" 2>/dev/null
-			tries=0
-			while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 3 ]; do
-				sleep 1
-				tries=$((tries + 1))
-			done
-			kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
-		fi
-		rm -f "$PIDFILE"
-	fi
-	"$STREAMER_INIT" stop
-	echo "Stopping $NAME: OK"
-}
-
-case "$1" in
-	start|stop) "$1" ;;
-	restart|reload) stop; start ;;
-	*) echo "Usage: $0 {start|stop|restart|reload}" >&2; exit 1 ;;
-esac
+if [ "${0##*/}" = S61lumi-streamer-watch ]; then main "$@"; fi

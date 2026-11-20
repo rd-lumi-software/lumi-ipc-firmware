@@ -42,5 +42,9 @@
   "etc/init.d/S50dropbear": [
     "general/overlay",
     "lumi/board/t33gs-prj008/overlay"
+  ],
+  "etc/inittab": [
+    "general/overlay",
+    "lumi/board/t33gs-prj008/overlay"
   ]
 }

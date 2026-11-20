@@ -37,6 +37,7 @@ t33gs-plan t33gs-prepare t33gs-full:
 t33gs-test:
 	@bash "$(T33GS_LOCAL_ROOT)/ci/t33gs/test-local.sh"
 	@python3 "$(T33GS_LOCAL_ROOT)/ci/t33gs/test_pipeline.py"
+	@python3 "$(T33GS_LOCAL_ROOT)/lumi/scripts/tests/test-runtime-log-bound.py"
 
 .PHONY: lumi-board-full
 # MAKEFLAGS carries an explicit -jN; forward N across the container boundary.

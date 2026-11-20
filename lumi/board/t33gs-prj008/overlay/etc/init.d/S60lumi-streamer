@@ -4,11 +4,14 @@ set -eu
 umask 077
 NAME=lumi-ipc-streamer
 BIN=/lumi/bin
+LOG_DIR=/tmp/log
 PROFILE=/lumi/camera-profile.json
 PIDFILE=/var/run/lumi-ipc-streamer.pid
 LOCK=/var/run/lumi-ipc-streamer.init-lock
 READY=/tmp/lumi-supervisor.ready
 STARTED=/tmp/lumi-runtime.started
+ARMED=/run/lumi-runtime.armed
+INHIBIT=/run/lumi-runtime.stopped
 RELAY_INIT=$BIN/lumi-t33gs-relay-agent
 
 lock() {
@@ -28,9 +31,10 @@ lock() {
 running() { [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 start() {
  if running; then echo 'Lumi runtime already running'; return 0; fi
- if [ -e "$STARTED" ]; then echo 'Lumi runtime requires reboot before reopening IMP' >&2; return 1; fi
+ if [ -e "$INHIBIT" ] || [ -e "$STARTED" ]; then echo 'Lumi runtime requires reboot before reopening IMP' >&2; return 1; fi
  [ -x "$BIN/ipc-stream-supervisor" ] && [ -x "$BIN/lumi-config" ]
  mountpoint -q /overlay
+ mkdir -p "$LOG_DIR"
  tries=0; wlan_ip=''
  while [ "$tries" -lt 30 ]; do
   wlan_ip=$(ip -4 -o addr show dev wlan0 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')
@@ -115,13 +119,14 @@ start() {
  . /tmp/lumi-gateway.env
  export LUMI_CONFIG_PATH
  rm -f "$READY"
- "$BIN/ipc-stream-supervisor" >> /tmp/lumi-streamer.log 2>&1 &
+ "$BIN/ipc-stream-supervisor" >> "$LOG_DIR/lumi-streamer.log" 2>&1 &
  pid=$!; echo "$pid" > "$PIDFILE"
  tries=0
  while [ "$tries" -lt 30 ]; do
   if [ -f "$READY" ] && kill -0 "$pid" 2>/dev/null; then
+   : > "$ARMED"
    if [ "$LUMI_MODULE_RELAY" = 1 ]; then
-    if [ -s "$LUMI_RELAY_KEY" ]; then "$RELAY_INIT" start >> /tmp/lumi-relay.log 2>&1 || echo 'Lumi relay startup failed' >&2
+    if [ -s "$LUMI_RELAY_KEY" ]; then "$RELAY_INIT" start >> "$LOG_DIR/lumi-relay.log" 2>&1 || echo 'Lumi relay startup failed' >&2
     else echo 'Lumi relay waiting for device identity'; fi
    fi
    echo 'Lumi runtime ready'; return 0
@@ -129,8 +134,21 @@ start() {
   kill -0 "$pid" 2>/dev/null || break
   tries=$((tries + 1)); sleep 1
  done
- echo 'Lumi runtime failed; inspect /tmp/lumi-streamer.log; reboot required' >&2
+ echo "Lumi runtime failed; inspect $LOG_DIR/lumi-streamer.log; reboot required" >&2
  return 1
+}
+signal_runtime_children() {
+ signal=$1
+ found=1
+ for child in $(pidof ipc-stream-core ipc-stream-services ipc-stream-recorder ipc-voice-worker); do
+  case "$(readlink "/proc/$child/exe" 2>/dev/null)" in
+   "$BIN/ipc-stream-core"|"$BIN/ipc-stream-services"|"$BIN/ipc-stream-recorder"|"$BIN/ipc-voice-worker")
+    found=0
+    [ -z "$signal" ] || kill "-$signal" "$child" 2>/dev/null || true
+    ;;
+  esac
+ done
+ return "$found"
 }
 stop() {
  "$RELAY_INIT" stop || true
@@ -140,10 +158,20 @@ stop() {
   while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 10 ]; do sleep 1; tries=$((tries + 1)); done
   kill -0 "$pid" 2>/dev/null && kill -TERM "$pid" 2>/dev/null || true
  fi
+ # Orphaned children can retain SD handles when the supervisor is killed.
+ if [ -s "$PIDFILE" ] && signal_runtime_children TERM; then
+  tries=0
+  while signal_runtime_children '' && [ "$tries" -lt 10 ]; do
+   sleep 1
+   tries=$((tries + 1))
+  done
+  signal_runtime_children KILL || true
+ fi
  rm -f "$PIDFILE" "$READY"
 }
 case "${1:-}" in
- start|stop) lock; "$1" ;;
+ start) lock; start ;;
+ stop) : > "$INHIBIT"; lock; stop ;;
  restart|reload) echo 'Reboot required to apply runtime module changes' >&2; exit 1 ;;
  *) echo "Usage: $0 {start|stop}" >&2; exit 64 ;;
 esac

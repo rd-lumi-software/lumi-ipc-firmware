@@ -16,6 +16,10 @@ python3 "$(dirname "$0")/t33-gateway-profile.py" create "$runtime" "$destination
 rm -rf "$target/usr/lib/lumi-ipc-streamer"
 mkdir -p "$destination/bin" "$destination/lib"
 for name in "${required[@]}"; do install -m 755 "$runtime/bin/$name" "$destination/bin/$name"; done
+# The firmware owns the log directory even when the relay wrapper comes from a pinned streamer.
+relay_init=$destination/bin/lumi-t33gs-relay-agent
+sed -i 's|^readonly logfile=/tmp/lumi-t33gs-relay-agent\.log$|readonly logfile=/tmp/log/lumi-t33gs-relay-agent.log|' "$relay_init"
+grep -qxF 'readonly logfile=/tmp/log/lumi-t33gs-relay-agent.log' "$relay_init"
 # Incremental builds must remove executables whose owners were merged.
 for name in ipc-stream-worker ipc-stream-motor media-worker-p2p.t33 lumi-t33gs-p2p ipc-wakeword-worker ipc-luvox-worker voice-ram-supervisor; do
  rm -f "$destination/bin/$name"
